@@ -1,9 +1,95 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter_contacts/flutter_contacts.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
   static Widget create(BuildContext context) => const SettingsScreen();
+
+  Future<void> _syncContacts(BuildContext context) async {
+    try {
+      if (await FlutterContacts.requestPermission()) {
+        if (context.mounted) {
+          showCupertinoDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => const Center(child: CupertinoActivityIndicator(radius: 16)),
+          );
+        }
+
+        final contacts = await FlutterContacts.getContacts(withProperties: true);
+        final batch = FirebaseFirestore.instance.batch();
+        final addressBookRef = FirebaseFirestore.instance.collection('address_book');
+
+        for (final contact in contacts) {
+          if (contact.phones.isNotEmpty) {
+            final phone = contact.phones.first.number;
+            // Clean phone number
+            final cleanPhone = phone.replaceAll(RegExp(r'[\s\-+]'), '');
+            
+            final docRef = addressBookRef.doc();
+            batch.set(docRef, {
+              'phone': cleanPhone,
+              'name': contact.displayName,
+            });
+          }
+        }
+
+        await batch.commit();
+
+        if (context.mounted) {
+          Navigator.pop(context); // Dismiss loading
+          showCupertinoDialog(
+            context: context,
+            builder: (context) => CupertinoAlertDialog(
+              title: const Text('Success'),
+              content: Text('Successfully synced ${contacts.length} contacts.'),
+              actions: [
+                CupertinoDialogAction(
+                  child: const Text('OK'),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          );
+        }
+      } else {
+        if (context.mounted) {
+          showCupertinoDialog(
+            context: context,
+            builder: (context) => CupertinoAlertDialog(
+              title: const Text('Permission Denied'),
+              content: const Text('We need contact permissions to sync your address book.'),
+              actions: [
+                CupertinoDialogAction(
+                  child: const Text('OK'),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context); // Ensure loading is dismissed on error
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to sync contacts: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -136,6 +222,16 @@ class SettingsScreen extends StatelessWidget {
                     ),
                   ],
                 ),
+                _SettingsSection(
+                  children: [
+                    _SettingsTile(
+                      icon: CupertinoIcons.person_3_fill,
+                      iconBgColor: CupertinoColors.systemIndigo,
+                      title: 'Sync Phone Contacts',
+                      onPressed: () => _syncContacts(context),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 24),
                 _SettingsSection(
                   children: [
@@ -197,18 +293,20 @@ class _SettingsTile extends StatelessWidget {
   final IconData icon;
   final Color iconBgColor;
   final String title;
+  final VoidCallback? onPressed;
 
   const _SettingsTile({
     required this.icon,
     required this.iconBgColor,
     required this.title,
+    this.onPressed,
   });
 
   @override
   Widget build(BuildContext context) {
     return CupertinoButton(
       padding: EdgeInsets.zero,
-      onPressed: () {},
+      onPressed: onPressed ?? () {},
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
         child: Row(

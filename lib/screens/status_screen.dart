@@ -1,7 +1,7 @@
-import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/cupertino.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
 class StatusScreen extends StatelessWidget {
@@ -9,63 +9,55 @@ class StatusScreen extends StatelessWidget {
 
   static Widget create(BuildContext context) => const StatusScreen();
 
+  void _showCupertinoAlert(BuildContext context, String title, String content) {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('OK'),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _pickAndUploadStory(BuildContext context) async {
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-
     if (image == null) return;
 
     try {
-      final File file = File(image.path);
-      final String fileName = '${DateTime.now().millisecondsSinceEpoch}.jpg';
-      final Reference storageRef =
-          FirebaseStorage.instance.ref().child('stories/$fileName');
+      // 1. Upload to Cloudinary via REST API
+      final url = Uri.parse('https://api.cloudinary.com/v1_1/druwafmub/image/upload');
+      final request = http.MultipartRequest('POST', url)
+        ..fields['upload_preset'] = 'whatsappClone'
+        ..files.add(await http.MultipartFile.fromPath('file', image.path));
 
-      // Upload file to Firebase Storage
-      final UploadTask uploadTask = storageRef.putFile(file);
-      final TaskSnapshot snapshot = await uploadTask;
-      final String downloadUrl = await snapshot.ref.getDownloadURL();
+      final response = await request.send();
+      final responseData = await response.stream.bytesToString();
+      final jsonResponse = jsonDecode(responseData);
+      final String secureUrl = jsonResponse['secure_url'];
 
-      // Create document in Firestore
-      await FirebaseFirestore.instance.collection('stories').add({
-        'url': downloadUrl,
-        'senderName': 'Ankit', // Logic to get current user name could be added here
-        'senderId': 'user_ankit_123', // Logic to get current user ID
+      // 2. ONLY write to 'outbox_stories'
+      // Do NOT write to 'stories' manually. Let the bridge handle that.
+      await FirebaseFirestore.instance.collection('outbox_stories').add({
+        'url': secureUrl,
+        'senderName': 'Ankit',
         'timestamp': FieldValue.serverTimestamp(),
-        'caption': '', // Caption can be added via a custom UI if needed
-        'type': 'image',
+        'status': 'pending', // Bridge will see this and post to WhatsApp
+        'caption': '',
       });
 
       if (context.mounted) {
-        showCupertinoDialog(
-          context: context,
-          builder: (context) => CupertinoAlertDialog(
-            title: const Text('Success'),
-            content: const Text('Story uploaded successfully!'),
-            actions: [
-              CupertinoDialogAction(
-                child: const Text('OK'),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
-          ),
-        );
+        _showCupertinoAlert(context, 'Success', 'Status sent to WhatsApp!');
       }
     } catch (e) {
       if (context.mounted) {
-        showCupertinoDialog(
-          context: context,
-          builder: (context) => CupertinoAlertDialog(
-            title: const Text('Error'),
-            content: Text('Failed to upload story: $e'),
-            actions: [
-              CupertinoDialogAction(
-                child: const Text('OK'),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
-          ),
-        );
+        _showCupertinoAlert(context, 'Error', e.toString());
       }
     }
   }
@@ -153,7 +145,7 @@ class _StatusRingStrip extends StatelessWidget {
             itemBuilder: (context, index) {
               if (index == 0) {
                 // My Status
-                return _StatusRingAvatar(
+                return const _StatusRingAvatar(
                   name: 'My Status',
                   letter: 'A',
                   isMyStatus: true,
@@ -169,7 +161,8 @@ class _StatusRingStrip extends StatelessWidget {
 
               return _StatusRingAvatar(
                 name: senderName,
-                letter: data['url'] as String? ?? letter,
+                url: data['url'] as String?,
+                letter: letter,
                 isMyStatus: false,
                 seen: false, // Treat all as unseen (green ring)
               );
@@ -183,12 +176,14 @@ class _StatusRingStrip extends StatelessWidget {
 
 class _StatusRingAvatar extends StatelessWidget {
   final String name;
+  final String? url;
   final String letter;
   final bool isMyStatus;
   final bool seen;
 
   const _StatusRingAvatar({
     required this.name,
+    this.url,
     required this.letter,
     required this.isMyStatus,
     required this.seen,
@@ -233,13 +228,13 @@ class _StatusRingAvatar extends StatelessWidget {
                   child: Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      image: !isMyStatus && name != 'My Status'
+                      image: !isMyStatus && name != 'My Status' && url != null && url!.toString().isNotEmpty
                           ? DecorationImage(
-                              image: NetworkImage(letter), // Passing URL as letter for now
+                              image: NetworkImage(url!),
                               fit: BoxFit.cover,
                             )
                           : null,
-                      gradient: isMyStatus || name == 'My Status'
+                      gradient: isMyStatus || name == 'My Status' || url == null || url!.toString().isEmpty
                           ? LinearGradient(
                               colors: [
                                 CupertinoColors.systemGrey.withValues(alpha: 0.3),
@@ -248,10 +243,10 @@ class _StatusRingAvatar extends StatelessWidget {
                             )
                           : null,
                     ),
-                    child: (isMyStatus || name == 'My Status')
+                    child: (isMyStatus || name == 'My Status' || url == null || url!.toString().isEmpty)
                         ? Center(
                             child: Text(
-                              letter,
+                              (isMyStatus || name == 'My Status') ? 'A' : letter,
                               style: const TextStyle(
                                 color: CupertinoColors.white,
                                 fontSize: 22,
@@ -378,7 +373,7 @@ class _RecentStories extends StatelessWidget {
                       border:
                           Border.all(color: const Color(0xFF25D366), width: 2),
                     ),
-                    child: type == 'image' && data['url'] != null
+                    child: type == 'image' && data['url'] != null && data['url'].toString().isNotEmpty
                         ? ClipOval(
                             child: Image.network(
                               data['url'],

@@ -36,15 +36,15 @@ class HomeScreen extends StatelessWidget {
       tabBuilder: (context, index) {
         switch (index) {
           case 0:
-            return const CupertinoTabView(builder: StatusScreen.create);
+            return CupertinoTabView(builder: (context) => const StatusScreen());
           case 1:
-            return const CupertinoTabView(builder: CallsScreen.create);
+            return CupertinoTabView(builder: (context) => const CallsScreen());
           case 2:
-            return const CupertinoTabView(builder: ChatsListScreen.create);
+            return CupertinoTabView(builder: (context) => const ChatsListScreen());
           case 3:
-            return const CupertinoTabView(builder: SettingsScreen.create);
+            return CupertinoTabView(builder: (context) => const SettingsScreen());
           default:
-            return const CupertinoTabView(builder: ChatsListScreen.create);
+            return CupertinoTabView(builder: (context) => const ChatsListScreen());
         }
       },
     );
