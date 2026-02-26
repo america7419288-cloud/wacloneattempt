@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "967282882134",
+    "project_id": "mycustomwa",
+    "storage_bucket": "mycustomwa.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:967282882134:android:48b1059cd626389428edf7",
+        "android_client_info": {
+          "package_name": "com.example.wacloneattempt"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCERyJCMzxjQFb9YZdV4MORaPb7B7d87IA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
