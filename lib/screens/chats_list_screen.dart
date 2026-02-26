@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'chat_detail_screen.dart';
+import 'contact_picker_screen.dart';
 
 class ChatsListScreen extends StatefulWidget {
   const ChatsListScreen({super.key});
@@ -21,10 +22,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         slivers: [
           const CupertinoSliverNavigationBar(
             largeTitle: Text('Chats'),
-            trailing: Icon(
-              CupertinoIcons.square_pencil,
-              color: CupertinoColors.systemBlue,
-            ),
+            trailing: _ComposeButton(),
           ),
           // Search bar
           SliverToBoxAdapter(
@@ -152,6 +150,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     final timestamp = data['timestamp'] as Timestamp?;
                     final avatarLetter = data['avatarLetter'] as String? ??
                         (name.isNotEmpty ? name[0].toUpperCase() : '?');
+                    final profileUrl = data['profileUrl'] as String?;
 
                     return _ChatTile(
                       jid: jid,
@@ -159,6 +158,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       lastMessage: lastMessage,
                       timestamp: timestamp,
                       avatarLetter: avatarLetter,
+                      profileUrl: profileUrl,
                     );
                   },
                   childCount: docs.length,
@@ -188,6 +188,28 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   }
 }
 
+class _ComposeButton extends StatelessWidget {
+  const _ComposeButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      padding: EdgeInsets.zero,
+      onPressed: () {
+        Navigator.of(context).push(
+          CupertinoPageRoute(
+            builder: (_) => const ContactPickerScreen(),
+          ),
+        );
+      },
+      child: const Icon(
+        CupertinoIcons.square_pencil,
+        color: CupertinoColors.systemBlue,
+      ),
+    );
+  }
+}
+
 String _formatTimestamp(Timestamp? timestamp) {
   if (timestamp == null) return '';
   final dt = timestamp.toDate();
@@ -212,6 +234,7 @@ class _ChatTile extends StatelessWidget {
   final String lastMessage;
   final Timestamp? timestamp;
   final String avatarLetter;
+  final String? profileUrl;
 
   const _ChatTile({
     required this.jid,
@@ -219,6 +242,7 @@ class _ChatTile extends StatelessWidget {
     required this.lastMessage,
     required this.timestamp,
     required this.avatarLetter,
+    this.profileUrl,
   });
 
   @override
@@ -254,26 +278,36 @@ class _ChatTile extends StatelessWidget {
               width: 52,
               height: 52,
               decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    CupertinoColors.systemGrey.withValues(alpha: 0.4),
-                    CupertinoColors.systemGrey2.withValues(alpha: 0.6),
-                  ],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
+                gradient: (profileUrl == null || profileUrl!.isEmpty)
+                    ? LinearGradient(
+                        colors: [
+                          CupertinoColors.systemGrey.withValues(alpha: 0.4),
+                          CupertinoColors.systemGrey2.withValues(alpha: 0.6),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      )
+                    : null,
+                image: (profileUrl != null && profileUrl!.isNotEmpty)
+                    ? DecorationImage(
+                        image: NetworkImage(profileUrl!),
+                        fit: BoxFit.cover,
+                      )
+                    : null,
                 shape: BoxShape.circle,
               ),
-              child: Center(
-                child: Text(
-                  avatarLetter,
-                  style: const TextStyle(
-                    color: CupertinoColors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
+              child: (profileUrl == null || profileUrl!.isEmpty)
+                  ? Center(
+                      child: Text(
+                        avatarLetter,
+                        style: const TextStyle(
+                          color: CupertinoColors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : null,
             ),
             const SizedBox(width: 12),
             // Name + last message

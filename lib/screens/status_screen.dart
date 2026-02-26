@@ -4,6 +4,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
+import 'status_view_screen.dart';
+
 class StatusScreen extends StatelessWidget {
   const StatusScreen({super.key});
 
@@ -115,7 +117,7 @@ class _StatusRingStrip extends StatelessWidget {
       height: 110,
       child: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
-            .collection('stories')
+            .collection('outbox_stories')
             .where('timestamp',
                 isGreaterThan: Timestamp.fromDate(
                     DateTime.now().subtract(const Duration(hours: 24))))
@@ -124,16 +126,23 @@ class _StatusRingStrip extends StatelessWidget {
         builder: (context, snapshot) {
           // Always show "My Status" as the first item
           final List<Map<String, dynamic>> storyUsers = [];
+          String? myLatestStoryUrl;
 
           if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
             // Group stories by senderName, keep unique senders
             final Set<String> seenSenders = {};
             for (final doc in snapshot.data!.docs) {
               final data = doc.data() as Map<String, dynamic>;
+              final senderId = data['senderId'] as String? ?? '';
               final senderName = data['senderName'] as String? ?? 'Unknown';
-              if (!seenSenders.contains(senderName)) {
-                seenSenders.add(senderName);
-                storyUsers.add(data);
+
+              if (senderId == 'user_ankit_123') {
+                myLatestStoryUrl ??= data['url'] as String?;
+              } else {
+                if (!seenSenders.contains(senderName)) {
+                  seenSenders.add(senderName);
+                  storyUsers.add(data);
+                }
               }
             }
           }
@@ -145,11 +154,32 @@ class _StatusRingStrip extends StatelessWidget {
             itemBuilder: (context, index) {
               if (index == 0) {
                 // My Status
-                return const _StatusRingAvatar(
-                  name: 'My Status',
-                  letter: 'A',
-                  isMyStatus: true,
-                  seen: true,
+                return GestureDetector(
+                  onTap: () {
+                    if (myLatestStoryUrl != null && myLatestStoryUrl!.isNotEmpty) {
+                      Navigator.push(
+                        context,
+                        CupertinoPageRoute(
+                          builder: (_) => StatusViewScreen(
+                            url: myLatestStoryUrl!,
+                            senderName: 'My Status',
+                          ),
+                        ),
+                      );
+                    } else {
+                      // Trigger upload if 'My Status' has no story
+                      // We need to access the _pickAndUploadStory from the parent,
+                      // Since it's stateless here we might just notify parent, or 
+                      // let user use the top camera icon for now to avoid refactor.
+                    }
+                  },
+                  child: _StatusRingAvatar(
+                    name: 'My Status',
+                    url: myLatestStoryUrl,
+                    letter: 'A',
+                    isMyStatus: true,
+                    seen: true,
+                  ),
                 );
               }
 
@@ -159,12 +189,27 @@ class _StatusRingStrip extends StatelessWidget {
                   ? senderName[0].toUpperCase()
                   : '?';
 
-              return _StatusRingAvatar(
-                name: senderName,
-                url: data['url'] as String?,
-                letter: letter,
-                isMyStatus: false,
-                seen: false, // Treat all as unseen (green ring)
+              return GestureDetector(
+                onTap: () {
+                  if (data['url'] != null && data['url'].toString().isNotEmpty) {
+                    Navigator.push(
+                      context,
+                      CupertinoPageRoute(
+                        builder: (_) => StatusViewScreen(
+                          url: data['url'],
+                          senderName: senderName,
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: _StatusRingAvatar(
+                  name: senderName,
+                  url: data['url'] as String?,
+                  letter: letter,
+                  isMyStatus: false,
+                  seen: false, // Treat all as unseen (green ring)
+                ),
               );
             },
           );
@@ -228,13 +273,13 @@ class _StatusRingAvatar extends StatelessWidget {
                   child: Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      image: !isMyStatus && name != 'My Status' && url != null && url!.toString().isNotEmpty
+                      image: url != null && url!.isNotEmpty
                           ? DecorationImage(
                               image: NetworkImage(url!),
                               fit: BoxFit.cover,
                             )
                           : null,
-                      gradient: isMyStatus || name == 'My Status' || url == null || url!.toString().isEmpty
+                      gradient: url == null || url!.isEmpty
                           ? LinearGradient(
                               colors: [
                                 CupertinoColors.systemGrey.withValues(alpha: 0.3),
@@ -243,10 +288,10 @@ class _StatusRingAvatar extends StatelessWidget {
                             )
                           : null,
                     ),
-                    child: (isMyStatus || name == 'My Status' || url == null || url!.toString().isEmpty)
+                    child: (url == null || url!.isEmpty)
                         ? Center(
                             child: Text(
-                              (isMyStatus || name == 'My Status') ? 'A' : letter,
+                              letter,
                               style: const TextStyle(
                                 color: CupertinoColors.white,
                                 fontSize: 22,
@@ -306,7 +351,7 @@ class _RecentStories extends StatelessWidget {
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
-          .collection('stories')
+          .collection('outbox_stories')
           .where('timestamp',
               isGreaterThan: Timestamp.fromDate(
                   DateTime.now().subtract(const Duration(hours: 24))))
@@ -320,7 +365,23 @@ class _RecentStories extends StatelessWidget {
           );
         }
 
-        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+        final List<Map<String, dynamic>> uniqueOtherStories = [];
+        final Set<String> seenSenders = {};
+        
+        for (final doc in snapshot.data!.docs) {
+          final data = doc.data() as Map<String, dynamic>;
+          final senderId = data['senderId'] as String? ?? '';
+          final senderName = data['senderName'] as String? ?? 'Unknown';
+
+          if (senderId != 'user_ankit_123') {
+            if (!seenSenders.contains(senderName)) {
+              seenSenders.add(senderName);
+              uniqueOtherStories.add(data);
+            }
+          }
+        }
+
+        if (uniqueOtherStories.isEmpty) {
           return Padding(
             padding: const EdgeInsets.all(32),
             child: Center(
@@ -335,13 +396,12 @@ class _RecentStories extends StatelessWidget {
           );
         }
 
-        final docs = snapshot.data!.docs;
         return ListView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          itemCount: docs.length,
+          itemCount: uniqueOtherStories.length,
           itemBuilder: (context, index) {
-            final data = docs[index].data() as Map<String, dynamic>;
+            final data = uniqueOtherStories[index];
             final senderName = data['senderName'] as String? ?? 'Unknown';
             final caption = data['caption'] as String? ?? '';
             final type = data['type'] as String? ?? 'text';
@@ -349,80 +409,95 @@ class _RecentStories extends StatelessWidget {
                 ? senderName[0].toUpperCase()
                 : '?';
 
-            return Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: const BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                      color: CupertinoColors.separator, width: 0.5),
-                ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF25D366), Color(0xFF128C7E)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+            return GestureDetector(
+              onTap: () {
+                if (data['url'] != null && data['url'].toString().isNotEmpty) {
+                  Navigator.push(
+                    context,
+                    CupertinoPageRoute(
+                      builder: (_) => StatusViewScreen(
+                        url: data['url'],
+                        senderName: senderName,
                       ),
-                      border:
-                          Border.all(color: const Color(0xFF25D366), width: 2),
                     ),
-                    child: type == 'image' && data['url'] != null && data['url'].toString().isNotEmpty
-                        ? ClipOval(
-                            child: Image.network(
-                              data['url'],
-                              fit: BoxFit.cover,
-                              errorBuilder: (context, error, stackTrace) =>
-                                  const Icon(CupertinoIcons.photo,
-                                      color: CupertinoColors.white, size: 20),
-                            ),
-                          )
-                        : Center(
-                            child: Text(
-                              letter,
-                              style: const TextStyle(
-                                color: CupertinoColors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.w600,
+                  );
+                }
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: const BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                        color: CupertinoColors.separator, width: 0.5),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF25D366), Color(0xFF128C7E)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        border:
+                            Border.all(color: const Color(0xFF25D366), width: 2),
+                      ),
+                      child: type == 'image' && data['url'] != null && data['url'].toString().isNotEmpty
+                          ? ClipOval(
+                              child: Image.network(
+                                data['url'],
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) =>
+                                    const Icon(CupertinoIcons.photo,
+                                        color: CupertinoColors.white, size: 20),
+                              ),
+                            )
+                          : Center(
+                              child: Text(
+                                letter,
+                                style: const TextStyle(
+                                  color: CupertinoColors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                          ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          senderName,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                            color: CupertinoColors.black,
-                          ),
-                        ),
-                        if (caption.isNotEmpty) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            caption,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: CupertinoColors.systemGrey,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ],
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            senderName,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: CupertinoColors.black,
+                            ),
+                          ),
+                          if (caption.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              caption,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: CupertinoColors.systemGrey,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             );
           },

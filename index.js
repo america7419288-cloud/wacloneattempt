@@ -2,13 +2,22 @@ const {
     default: makeWASocket, 
     useMultiFileAuthState, 
     DisconnectReason, 
-    fetchLatestBaileysVersion 
+    fetchLatestBaileysVersion,
+    downloadMediaMessage 
 } = require('@whiskeysockets/baileys');
 const admin = require('firebase-admin');
 const qrcode = require('qrcode-terminal');
 const { Boom } = require('@hapi/boom');
+const cloudinary = require('cloudinary').v2;
 
-// 1. Connect to Firebase
+// 1. CLOUDINARY CONFIGURATION
+cloudinary.config({ 
+  cloud_name: 'druwafmub', 
+  api_key: '542473722884225', 
+  api_secret: 'cD2OobWvCFwJvOSIYEDL1gl-fUY' 
+});
+
+// 2. FIREBASE CONFIGURATION
 const serviceAccount = require("./serviceAccountKey.json");
 if (!admin.apps.length) {
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
@@ -28,7 +37,7 @@ async function startWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // 2. Handle Connection & QR
+    // 3. CONNECTION HANDLER
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         if (qr) {
@@ -43,78 +52,172 @@ async function startWhatsApp() {
             if (shouldReconnect) startWhatsApp();
         } else if (connection === 'open') {
             console.log('✅ Success! WhatsApp is connected.');
-            
-            // START LISTENING TO OUTBOX ONCE CONNECTED
             listenToOutbox(sock);
+            listenToAddressBook(sock);
+            listenToStoryOutbox(sock);
         }
     });
 
-    // 3. Receive Messages & Update Contacts (For your Sidebar/ChatsList)
+    // 4. PRESENCE UPDATES
+    sock.ev.on('presence.update', async ({ id, presences }) => {
+        const userPresence = presences[id];
+        if (userPresence) {
+            await db.collection('contacts').doc(id.toLowerCase()).set({
+                presence: userPresence.lastKnownPresence, 
+                lastSeen: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+        }
+    });
+
+    // 5. INCOMING MESSAGES & STATUS HANDLER
     sock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
         if (!msg.message) return;
 
-        const jid = msg.key.remoteJid;
+        // FIX 1: Normalize JID to lowercase to prevent duplicates
+        const jid = msg.key.remoteJid.toLowerCase();
+        
+        // FIX 2: Lookup existing contact to prevent names reverting to numbers
+        const contactDoc = await db.collection('contacts').doc(jid).get();
+        let senderName = "";
+
+        if (contactDoc.exists && contactDoc.data().name) {
+            senderName = contactDoc.data().name; 
+        } else {
+            senderName = msg.pushName || jid.split('@')[0];
+        }
+
+        // --- HANDLE STATUS UPDATES (STORIES) ---
+        if (jid === 'status@broadcast') {
+            if (msg.key.fromMe) return; 
+
+            const statusSender = msg.key.participant || "";
+            const statusName = msg.pushName || (statusSender ? statusSender.split('@')[0] : "Unknown Status");
+            let mediaUrl = "";
+
+            const type = Object.keys(msg.message)[0];
+            if (type === 'imageMessage' || type === 'videoMessage') {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    const uploadResponse = await new Promise((resolve, reject) => {
+                        cloudinary.uploader.upload_stream({ resource_type: 'auto', folder: 'stories' }, (error, result) => {
+                            if (error) reject(error);
+                            else resolve(result);
+                        }).end(buffer);
+                    });
+                    mediaUrl = uploadResponse.secure_url;
+                } catch (err) { console.error("Cloudinary Error:", err); }
+            }
+
+            const textStatus = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+            
+            await db.collection('stories').add({
+                userId: statusSender,
+                userName: statusName,
+                text: textStatus,
+                url: mediaUrl,
+                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            return; 
+        }
+
+        // --- HANDLE REGULAR CHATS ---
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
         if (text) {
-            // Save Message (Matches your Flutter field names)
             await db.collection('messages').add({
                 chatId: jid,
                 from: jid,
-                text: text, // Flutter uses 'text', not 'content'
+                text: text,
+                senderName: senderName, 
                 isMe: msg.key.fromMe,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
             });
 
-            // Update Contact List (So your Flutter list shows the latest message)
+            // FIX 3: Use .set with { merge: true } to update existing documents instead of creating new ones
             await db.collection('contacts').doc(jid).set({
-                id: jid,
-                name: msg.pushName || jid.split('@')[0],
+                jid: jid,
+                name: senderName, 
                 lastMessage: text,
                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                avatarLetter: (msg.pushName || 'U').charAt(0).toUpperCase()
+                avatarLetter: senderName.charAt(0).toUpperCase()
             }, { merge: true });
-
-            console.log(`📩 Message from ${jid} saved.`);
         }
     });
 }
 
-// 4. THE OUTBOX LISTENER (Sends messages from Flutter to WhatsApp)
+// 6. ADDRESS BOOK SYNCER
+function listenToAddressBook(sock) {
+    db.collection('address_book').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+            if (change.type === 'added') {
+                const { phone, name } = change.doc.data();
+                try {
+                    const [result] = await sock.onWhatsApp(phone);
+                    if (result && result.exists) {
+                        const normalizedJid = result.jid.toLowerCase();
+                        await db.collection('contacts').doc(normalizedJid).set({
+                            jid: normalizedJid,
+                            name: name,
+                            avatarLetter: name.charAt(0).toUpperCase(),
+                            timestamp: admin.firestore.FieldValue.serverTimestamp()
+                        }, { merge: true });
+                    }
+                } catch (e) { console.error("Sync error:", e); }
+                await change.doc.ref.delete(); 
+            }
+        }
+    });
+}
+
+// 7. MESSAGE OUTBOX
 function listenToOutbox(sock) {
-    console.log('📡 Listening for outgoing messages from Flutter...');
-    
     db.collection('outbox').where('status', '==', 'pending').onSnapshot(snapshot => {
         snapshot.docChanges().forEach(async (change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const docId = change.doc.id;
-
                 try {
-                    console.log(`🚀 Sending message to ${data.to}...`);
-                    
-                    // Actually send the message via WhatsApp
                     await sock.sendMessage(data.to, { text: data.text });
-
-                    // Update Firestore so we don't send it twice
                     await db.collection('outbox').doc(docId).update({ 
                         status: 'sent',
                         sentAt: admin.firestore.FieldValue.serverTimestamp() 
                     });
-
-                    // Also add to messages collection so it appears in your UI
+                    
+                    const jid = data.to.toLowerCase();
                     await db.collection('messages').add({
-                        chatId: data.to,
+                        chatId: jid,
                         text: data.text,
                         from: 'me',
-                        isMe: true,
+                        fromMe: true, 
                         timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     });
-
                 } catch (error) {
-                    console.error("❌ Failed to send message:", error);
                     await db.collection('outbox').doc(docId).update({ status: 'error' });
+                }
+            }
+        });
+    });
+}
+
+// 8. STORY OUTBOX (Status Uploads)
+function listenToStoryOutbox(sock) {
+    db.collection('outbox_stories').where('status', '==', 'pending').onSnapshot(snapshot => {
+        snapshot.docChanges().forEach(async (change) => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                const docId = change.doc.id;
+                try {
+                    await sock.sendMessage('status@broadcast', { 
+                        image: { url: data.url }, 
+                        caption: data.caption || '' 
+                    });
+                    await db.collection('outbox_stories').doc(docId).update({ 
+                        status: 'sent',
+                        sentAt: admin.firestore.FieldValue.serverTimestamp() 
+                    });
+                } catch (error) {
+                    await db.collection('outbox_stories').doc(docId).update({ status: 'error' });
                 }
             }
         });
