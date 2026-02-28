@@ -15,6 +15,7 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
   List<Contact> _contacts = [];
   bool _isLoading = true;
   bool _permissionDenied = false;
+  Map<String, String> _profileUrls = {};
 
   @override
   void initState() {
@@ -34,8 +35,25 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
 
     final contacts = await FlutterContacts.getContacts(
         withProperties: true, withPhoto: true);
+
+    // Fetch all contact profile URLs in one go
+    final Map<String, String> urls = {};
+    try {
+      final snap = await FirebaseFirestore.instance.collection('contacts').get();
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final url = data['profileUrl'] as String? ?? '';
+        if (url.isNotEmpty) {
+          urls[doc.id] = url;
+        }
+      }
+    } catch (e) {
+      debugPrint('Error fetching contact profiles: $e');
+    }
+
     setState(() {
       _contacts = contacts;
+      _profileUrls = urls;
       _isLoading = false;
     });
   }
@@ -51,7 +69,7 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
     final fullJid = '$cleanPhone@s.whatsapp.net'.toLowerCase();
 
     try {
-      await FirebaseFirestore.instance.collection('address_book').add({
+      await FirebaseFirestore.instance.collection('address_book').doc(cleanPhone).set({
         'phone': cleanPhone,
         'name': contact.displayName,
         'timestamp': FieldValue.serverTimestamp(),
@@ -155,6 +173,26 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
             ? contact.displayName[0].toUpperCase()
             : '?';
 
+        final networkProfileUrl = _profileUrls[jid];
+
+        Widget avatarWidget;
+        if (networkProfileUrl != null && networkProfileUrl.isNotEmpty) {
+          avatarWidget = ClipOval(
+            child: CachedNetworkImage(
+              imageUrl: networkProfileUrl,
+              fit: BoxFit.cover,
+              placeholder: (context, url) => _buildFallback(letter),
+              errorWidget: (context, url, error) => _buildFallback(letter),
+            ),
+          );
+        } else if (contact.photo != null) {
+          avatarWidget = ClipOval(
+            child: Image.memory(contact.photo!, fit: BoxFit.cover),
+          );
+        } else {
+          avatarWidget = _buildFallback(letter);
+        }
+
         return GestureDetector(
           onTap: () => _selectContact(contact),
           child: Container(
@@ -169,47 +207,10 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
             ),
             child: Row(
               children: [
-                StreamBuilder<DocumentSnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('contacts')
-                      .doc(jid)
-                      .snapshots(),
-                  builder: (context, snapshot) {
-                    String? networkProfileUrl;
-                    if (snapshot.hasData && snapshot.data!.exists) {
-                      final data = snapshot.data!.data() as Map<String, dynamic>?;
-                      networkProfileUrl = data?['profileUrl'] as String?;
-                    }
-
-                    Widget avatarWidget;
-                    // Priority 1: Network Image from WhatsApp (via Firestore)
-                    if (networkProfileUrl != null && networkProfileUrl.isNotEmpty) {
-                      avatarWidget = ClipOval(
-                        child: CachedNetworkImage(
-                          imageUrl: networkProfileUrl,
-                          fit: BoxFit.cover,
-                          placeholder: (context, url) => _buildFallback(letter),
-                          errorWidget: (context, url, error) => _buildFallback(letter),
-                        ),
-                      );
-                    } 
-                    // Priority 2: Local Device Photo (as fallback)
-                    else if (contact.photo != null) {
-                      avatarWidget = ClipOval(
-                        child: Image.memory(contact.photo!, fit: BoxFit.cover),
-                      );
-                    } 
-                    // Priority 3: Letter Avatar
-                    else {
-                      avatarWidget = _buildFallback(letter);
-                    }
-
-                    return SizedBox(
-                      width: 44,
-                      height: 44,
-                      child: avatarWidget,
-                    );
-                  },
+                SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: avatarWidget,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -218,10 +219,10 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
                     children: [
                       Text(
                         contact.displayName,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.w600,
-                          color: CupertinoColors.black,
+                          color: CupertinoColors.label.resolveFrom(context),
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,

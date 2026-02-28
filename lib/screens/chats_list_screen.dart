@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show LinearProgressIndicator, AlwaysStoppedAnimation;
 import 'package:cached_network_image/cached_network_image.dart';
@@ -14,11 +15,22 @@ class ChatsListScreen extends StatefulWidget {
   State<ChatsListScreen> createState() => _ChatsListScreenState();
 }
 
-class _ChatsListScreenState extends State<ChatsListScreen> {
+class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAliveClientMixin {
   String _searchQuery = '';
+  Timer? _debounce;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return CupertinoPageScaffold(
       child: CustomScrollView(
         slivers: [
@@ -116,7 +128,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
               child: CupertinoSearchTextField(
                 placeholder: 'Search',
-                onChanged: (value) => setState(() => _searchQuery = value),
+                onChanged: (value) {
+                  _debounce?.cancel();
+                  _debounce = Timer(const Duration(milliseconds: 300), () {
+                    setState(() => _searchQuery = value);
+                  });
+                },
               ),
             ),
           ),
@@ -136,15 +153,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
             ),
           ),
           // Real-time chat list from Firestore contacts collection
-          StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('contacts')
-                .orderBy('timestamp', descending: true)
-                .snapshots(),
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return SliverToBoxAdapter(
-                  child: Padding(
+          SliverToBoxAdapter(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('contacts')
+                  .orderBy('timestamp', descending: true)
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return Padding(
                     padding: const EdgeInsets.all(24),
                     child: Center(
                       child: Column(
@@ -164,39 +181,35 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                         ],
                       ),
                     ),
-                  ),
-                );
-              }
+                  );
+                }
 
-              if (!snapshot.hasData) {
-                return const SliverToBoxAdapter(
-                  child: Padding(
+                if (!snapshot.hasData) {
+                  return const Padding(
                     padding: EdgeInsets.all(48),
                     child: Center(child: CupertinoActivityIndicator()),
-                  ),
-                );
-              }
+                  );
+                }
 
-              var docs = snapshot.data!.docs;
+                var docs = snapshot.data!.docs;
 
-              // Apply search filter
-              if (_searchQuery.isNotEmpty) {
-                docs = docs.where((doc) {
-                  final data = doc.data() as Map<String, dynamic>;
-                  final name = data['name'] as String? ?? '';
-                  final lastMsg = data['lastMessage'] as String? ?? '';
-                  return name
-                          .toLowerCase()
-                          .contains(_searchQuery.toLowerCase()) ||
-                      lastMsg
-                          .toLowerCase()
-                          .contains(_searchQuery.toLowerCase());
-                }).toList();
-              }
+                // Apply search filter
+                if (_searchQuery.isNotEmpty) {
+                  docs = docs.where((doc) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    final name = data['name'] as String? ?? '';
+                    final lastMsg = data['lastMessage'] as String? ?? '';
+                    return name
+                            .toLowerCase()
+                            .contains(_searchQuery.toLowerCase()) ||
+                        lastMsg
+                            .toLowerCase()
+                            .contains(_searchQuery.toLowerCase());
+                  }).toList();
+                }
 
-              if (docs.isEmpty) {
-                return SliverToBoxAdapter(
-                  child: Padding(
+                if (docs.isEmpty) {
+                  return Padding(
                     padding: const EdgeInsets.all(48),
                     child: Center(
                       child: Column(
@@ -220,13 +233,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                         ],
                       ),
                     ),
-                  ),
-                );
-              }
+                  );
+                }
 
-              return SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
+                return ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
                     final data = docs[index].data() as Map<String, dynamic>;
                     // doc.id is the JID (set by index.js via db.collection('contacts').doc(jid).set(...))
                     final jid = docs[index].id;
@@ -250,10 +264,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       isGroup: isGroup,
                     );
                   },
-                  childCount: docs.length,
-                ),
-              );
-            },
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -463,7 +476,6 @@ class _ChatTile extends StatelessWidget {
                     style: const TextStyle(
                       fontSize: 16.5,
                       fontWeight: FontWeight.w600,
-                      color: CupertinoColors.black,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,

@@ -64,12 +64,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     }
     FirebaseFirestore.instance.collection('messages').add(msgPayload);
 
-    FirebaseFirestore.instance.collection('outbox').add({
+    final outboxPayload = <String, dynamic>{
       'to': jid,
       'text': text,
       'status': 'pending',
       'timestamp': FieldValue.serverTimestamp(),
-    });
+    };
+    if (_replyingTo != null) {
+      outboxPayload['replyTo'] = {
+        'msgKeyId': _replyingTo!['msgKeyId'] ?? '',
+      };
+    }
+    FirebaseFirestore.instance.collection('outbox').add(outboxPayload);
 
     _textController.clear();
     setState(() => _replyingTo = null);
@@ -276,13 +282,33 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const Text(
-                    'online',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: CupertinoColors.systemGrey,
-                      fontWeight: FontWeight.w400,
-                    ),
+                  StreamBuilder<DocumentSnapshot>(
+                    stream: FirebaseFirestore.instance
+                        .collection('contacts')
+                        .doc(widget.contactJid)
+                        .snapshots(),
+                    builder: (context, snap) {
+                      String subtitle = 'last seen recently';
+                      if (snap.hasData && snap.data!.exists) {
+                        final cData = snap.data!.data() as Map<String, dynamic>? ?? {};
+                        final presence = cData['presence'] as String? ?? '';
+                        if (presence == 'composing') {
+                          subtitle = 'typing...';
+                        } else if (presence == 'available') {
+                          subtitle = 'online';
+                        }
+                      }
+                      return Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: subtitle == 'typing...'
+                              ? CupertinoColors.systemGreen
+                              : CupertinoColors.systemGrey,
+                          fontWeight: FontWeight.w400,
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -450,30 +476,78 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
             final docId = docs[index].id;
             double swipeOffset = 0;
+            bool _didTriggerHaptic = false;
 
             return Column(
               children: [
-                ?dateHeader,
+                if (dateHeader != null) dateHeader,
                 StatefulBuilder(
                   builder: (context, setLocalState) {
                     return GestureDetector(
                       onHorizontalDragUpdate: (details) {
-                        setLocalState(() {
-                          swipeOffset = (swipeOffset + details.delta.dx).clamp(0.0, 80.0);
-                        });
+                        final delta = isOutgoing ? -details.delta.dx : details.delta.dx;
+                        if (delta > 0 || swipeOffset > 0) {
+                          setLocalState(() {
+                            swipeOffset = (swipeOffset + delta).clamp(0.0, 70.0);
+                            if (swipeOffset > 40 && !_didTriggerHaptic) {
+                              _didTriggerHaptic = true;
+                              HapticFeedback.mediumImpact();
+                            } else if (swipeOffset <= 40) {
+                              _didTriggerHaptic = false;
+                            }
+                          });
+                        }
                       },
-                      onHorizontalDragEnd: (_) {
-                        if (swipeOffset > 60) _setReply(data);
-                        setLocalState(() => swipeOffset = 0);
+                      onHorizontalDragEnd: (_) async {
+                        if (swipeOffset > 40) _setReply(data);
+                        // Animate snap back
+                        while (swipeOffset > 0) {
+                          await Future.delayed(const Duration(milliseconds: 16));
+                          if (!context.mounted) break;
+                          setLocalState(() {
+                            swipeOffset = (swipeOffset - 15).clamp(0.0, 70.0);
+                          });
+                        }
+                        if (context.mounted) {
+                          setLocalState(() {
+                            swipeOffset = 0;
+                            _didTriggerHaptic = false;
+                          });
+                        }
                       },
-                      onLongPress: () => _showLongPressMenu(context, data, docId),
-                      onDoubleTap: () => _showReactionPicker(context, data),
-                      child: Transform.translate(
-                        offset: Offset(swipeOffset, 0),
-                        child: _ChatBubble(
-                          data: data,
-                          time: timeStr,
-                          isOutgoing: isOutgoing,
+                      onLongPress: () {
+                        if (data['deleted'] == true) return;
+                        _showLongPressMenu(context, data, docId);
+                      },
+                      onDoubleTap: () {
+                        if (data['deleted'] == true) return;
+                        _showReactionPicker(context, data);
+                      },
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: Stack(
+                          alignment: isOutgoing ? Alignment.centerLeft : Alignment.centerRight,
+                          children: [
+                            if (swipeOffset > 10)
+                              Opacity(
+                                opacity: (swipeOffset / 60).clamp(0.0, 1.0),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 16),
+                                  child: Icon(CupertinoIcons.reply, color: CupertinoColors.systemGrey, size: 22),
+                                ),
+                              ),
+                            Align(
+                              alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+                              child: Transform.translate(
+                                offset: Offset(isOutgoing ? -swipeOffset : swipeOffset, 0),
+                                child: _ChatBubble(
+                                  data: data,
+                                  time: timeStr,
+                                  isOutgoing: isOutgoing,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     );
@@ -667,6 +741,7 @@ class _ChatBubble extends StatelessWidget {
             children: [
               Container(
                 constraints: BoxConstraints(
+                  minWidth: 80,
                   maxWidth: MediaQuery.of(context).size.width * 0.72,
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -684,21 +759,69 @@ class _ChatBubble extends StatelessWidget {
                   ),
                 ),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
+                  crossAxisAlignment: isOutgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                   children: [
                     // Reply preview
-                    if (replyTo != null) _buildReplyPreview(replyTo),
-                    _buildContent(type),
-                    const SizedBox(height: 3),
-                    Text(
-                      time,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: isOutgoing
-                            ? CupertinoColors.white.withValues(alpha: 0.7)
-                            : CupertinoColors.systemGrey,
+                    if (replyTo != null && data['deleted'] != true) _buildReplyPreview(replyTo),
+                    if (data['deleted'] == true)
+                      // Deleted message styling
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        crossAxisAlignment: WrapCrossAlignment.end,
+                        children: [
+                          Text(
+                            'This message was deleted',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontStyle: FontStyle.italic,
+                              color: isOutgoing
+                                  ? CupertinoColors.white.withValues(alpha: 0.7)
+                                  : CupertinoColors.systemGrey,
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8, top: 4),
+                            child: Text(
+                              time,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: isOutgoing
+                                    ? CupertinoColors.white.withValues(alpha: 0.7)
+                                    : CupertinoColors.systemGrey,
+                              ),
+                            ),
+                          ),
+                        ],
+                      )
+                    else
+                      Wrap(
+                        alignment: WrapAlignment.end,
+                        crossAxisAlignment: WrapCrossAlignment.end,
+                        children: [
+                          _buildContent(type),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8, top: 4),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  time,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: isOutgoing
+                                        ? CupertinoColors.white.withValues(alpha: 0.7)
+                                        : CupertinoColors.systemGrey,
+                                  ),
+                                ),
+                                if (isOutgoing) ...[
+                                  const SizedBox(width: 3),
+                                  _buildDeliveryTicks(),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -743,51 +866,97 @@ class _ChatBubble extends StatelessWidget {
     final displayAuthor = quotedAuthor.isNotEmpty
         ? quotedAuthor.split('@')[0]
         : 'Unknown';
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: isOutgoing
-            ? CupertinoColors.white.withValues(alpha: 0.15)
-            : CupertinoColors.systemGrey5,
-        borderRadius: BorderRadius.circular(8),
-        border: Border(
-          left: BorderSide(
-            color: isOutgoing
-                ? CupertinoColors.white.withValues(alpha: 0.6)
-                : CupertinoColors.systemBlue,
-            width: 3,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 52),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: isOutgoing
+              ? CupertinoColors.white.withValues(alpha: 0.15)
+              : CupertinoColors.systemGrey5,
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+            left: BorderSide(
+              color: isOutgoing
+                  ? CupertinoColors.white.withValues(alpha: 0.6)
+                  : CupertinoColors.systemBlue,
+              width: 3,
+            ),
           ),
         ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            displayAuthor,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: isOutgoing
-                  ? CupertinoColors.white.withValues(alpha: 0.9)
-                  : CupertinoColors.systemBlue,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              displayAuthor,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isOutgoing
+                    ? CupertinoColors.white.withValues(alpha: 0.9)
+                    : CupertinoColors.systemBlue,
+              ),
             ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            quotedText,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              fontSize: 13,
-              color: isOutgoing
-                  ? CupertinoColors.white.withValues(alpha: 0.7)
-                  : CupertinoColors.systemGrey,
+            const SizedBox(height: 2),
+            Text(
+              quotedText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                color: isOutgoing
+                    ? CupertinoColors.white.withValues(alpha: 0.7)
+                    : CupertinoColors.systemGrey,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
+  }
+
+  Widget _buildDeliveryTicks() {
+    final status = data['deliveryStatus'] as String? ?? 'pending';
+    switch (status) {
+      case 'read':
+        return Text(
+          '✓✓',
+          style: TextStyle(
+            fontSize: 11,
+            color: CupertinoColors.systemBlue,
+            fontWeight: FontWeight.w600,
+          ),
+        );
+      case 'played':
+        return Text(
+          '✓✓',
+          style: TextStyle(
+            fontSize: 11,
+            color: CupertinoColors.systemBlue,
+            fontWeight: FontWeight.w600,
+          ),
+        );
+      case 'delivered':
+        return Text(
+          '✓✓',
+          style: TextStyle(
+            fontSize: 11,
+            color: CupertinoColors.white.withValues(alpha: 0.7),
+          ),
+        );
+      default: // pending
+        return Text(
+          '✓',
+          style: TextStyle(
+            fontSize: 11,
+            color: CupertinoColors.white.withValues(alpha: 0.7),
+          ),
+        );
+    }
   }
 
   Widget _buildContent(String? type) {

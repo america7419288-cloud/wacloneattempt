@@ -178,7 +178,7 @@ class CallsScreen extends StatelessWidget {
                                 fontWeight: FontWeight.w600,
                                 color: call.isMissed
                                     ? CupertinoColors.systemRed
-                                    : CupertinoColors.black,
+                                    : null,
                               ),
                             ),
                             const SizedBox(height: 3),

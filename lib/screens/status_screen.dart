@@ -6,6 +6,9 @@ import 'package:image_picker/image_picker.dart';
 
 import 'status_view_screen.dart';
 
+// The user's own JID — used to identify "My Status" stories
+const String kOwnJid = '919728470719@s.whatsapp.net';
+
 class StatusScreen extends StatelessWidget {
   const StatusScreen({super.key});
 
@@ -67,54 +70,6 @@ class StatusScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      child: CustomScrollView(
-        slivers: [
-          CupertinoSliverNavigationBar(
-            largeTitle: const Text('Status'),
-            trailing: CupertinoButton(
-              padding: EdgeInsets.zero,
-              onPressed: () => _pickAndUploadStory(context),
-              child: const Icon(
-                CupertinoIcons.camera,
-                color: CupertinoColors.systemBlue,
-              ),
-            ),
-          ),
-          // Horizontal status ring list — streamed from Firestore stories
-          SliverToBoxAdapter(
-            child: _StatusRingStrip(),
-          ),
-          // Divider
-          const SliverToBoxAdapter(
-            child: Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text(
-                'RECENT UPDATES',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: CupertinoColors.systemGrey,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          ),
-          // Recent updates list from Firestore stories
-          SliverToBoxAdapter(
-            child: _RecentStories(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Horizontal scrolling story ring strip — reads from 'stories' collection
-class _StatusRingStrip extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 110,
       child: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
             .collection('stories')
@@ -124,96 +79,146 @@ class _StatusRingStrip extends StatelessWidget {
             .orderBy('timestamp', descending: true)
             .snapshots(),
         builder: (context, snapshot) {
-          // Always show "My Status" as the first item
-          final List<Map<String, dynamic>> storyUsers = [];
+          // Parse stories once for both widgets
+          final List<Map<String, dynamic>> otherStories = [];
           String? myLatestStoryUrl;
+          final Set<String> seenSenders = {};
 
           if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
-            // Group stories by senderName, keep unique senders
-            final Set<String> seenSenders = {};
             for (final doc in snapshot.data!.docs) {
               final data = doc.data() as Map<String, dynamic>;
               final senderId = data['senderId'] as String? ?? '';
               final senderName = data['senderName'] as String? ?? 'Unknown';
 
-              if (senderId == 'user_ankit_123') {
+              if (senderId == kOwnJid) {
                 myLatestStoryUrl ??= data['url'] as String?;
               } else {
                 if (!seenSenders.contains(senderName)) {
                   seenSenders.add(senderName);
-                  storyUsers.add(data);
+                  otherStories.add(data);
                 }
               }
             }
           }
 
-          return ListView.builder(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            itemCount: 1 + storyUsers.length, // +1 for My Status
-            itemBuilder: (context, index) {
-              if (index == 0) {
-                // My Status
-                return GestureDetector(
-                  onTap: () {
-                    if (myLatestStoryUrl != null && myLatestStoryUrl!.isNotEmpty) {
-                      Navigator.push(
-                        context,
-                        CupertinoPageRoute(
-                          builder: (_) => StatusViewScreen(
-                            url: myLatestStoryUrl!,
-                            senderName: 'My Status',
-                          ),
-                        ),
-                      );
-                    } else {
-                      // Trigger upload if 'My Status' has no story
-                      // We need to access the _pickAndUploadStory from the parent,
-                      // Since it's stateless here we might just notify parent, or 
-                      // let user use the top camera icon for now to avoid refactor.
-                    }
-                  },
-                  child: _StatusRingAvatar(
-                    name: 'My Status',
-                    url: myLatestStoryUrl,
-                    letter: 'A',
-                    isMyStatus: true,
-                    seen: true,
+          return CustomScrollView(
+            slivers: [
+              CupertinoSliverNavigationBar(
+                largeTitle: const Text('Status'),
+                trailing: CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  onPressed: () => _pickAndUploadStory(context),
+                  child: const Icon(
+                    CupertinoIcons.camera,
+                    color: CupertinoColors.systemBlue,
+                  ),
+                ),
+              ),
+              // Horizontal status ring list
+              SliverToBoxAdapter(
+                child: _StatusRingStrip(
+                  storyUsers: otherStories,
+                  myLatestStoryUrl: myLatestStoryUrl,
+                ),
+              ),
+              // Divider
+              const SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Text(
+                    'RECENT UPDATES',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: CupertinoColors.systemGrey,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+              ),
+              // Recent updates list
+              SliverToBoxAdapter(
+                child: _RecentStories(stories: otherStories),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Horizontal scrolling story ring strip
+class _StatusRingStrip extends StatelessWidget {
+  final List<Map<String, dynamic>> storyUsers;
+  final String? myLatestStoryUrl;
+
+  const _StatusRingStrip({required this.storyUsers, this.myLatestStoryUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 110,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        itemCount: 1 + storyUsers.length, // +1 for My Status
+        itemBuilder: (context, index) {
+          if (index == 0) {
+            // My Status
+            return GestureDetector(
+              onTap: () {
+                if (myLatestStoryUrl != null && myLatestStoryUrl!.isNotEmpty) {
+                  Navigator.push(
+                    context,
+                    CupertinoPageRoute(
+                      builder: (_) => StatusViewScreen(
+                        url: myLatestStoryUrl!,
+                        senderName: 'My Status',
+                      ),
+                    ),
+                  );
+                }
+              },
+              child: _StatusRingAvatar(
+                name: 'My Status',
+                url: myLatestStoryUrl,
+                letter: 'A',
+                isMyStatus: true,
+                seen: true,
+              ),
+            );
+          }
+
+          final data = storyUsers[index - 1];
+          final senderName = data['senderName'] as String? ?? 'Unknown';
+          final profileUrl = data['profileUrl'] as String?;
+          final letter = senderName.isNotEmpty
+              ? senderName[0].toUpperCase()
+              : '?';
+
+          return GestureDetector(
+            onTap: () {
+              if (data['url'] != null && data['url'].toString().isNotEmpty) {
+                Navigator.push(
+                  context,
+                  CupertinoPageRoute(
+                    builder: (_) => StatusViewScreen(
+                      url: data['url'],
+                      senderName: senderName,
+                    ),
                   ),
                 );
               }
-
-              final data = storyUsers[index - 1];
-              final senderName = data['senderName'] as String? ?? 'Unknown';
-              final profileUrl = data['profileUrl'] as String?;
-              final letter = senderName.isNotEmpty
-                  ? senderName[0].toUpperCase()
-                  : '?';
-
-              return GestureDetector(
-                onTap: () {
-                  if (data['url'] != null && data['url'].toString().isNotEmpty) {
-                    Navigator.push(
-                      context,
-                      CupertinoPageRoute(
-                        builder: (_) => StatusViewScreen(
-                          url: data['url'],
-                          senderName: senderName,
-                        ),
-                      ),
-                    );
-                  }
-                },
-                child: _StatusRingAvatar(
-                  name: senderName,
-                  url: data['url'] as String?,
-                  profileUrl: profileUrl,
-                  letter: letter,
-                  isMyStatus: false,
-                  seen: false, // Treat all as unseen (green ring)
-                ),
-              );
             },
+            child: _StatusRingAvatar(
+              name: senderName,
+              url: data['url'] as String?,
+              profileUrl: profileUrl,
+              letter: letter,
+              isMyStatus: false,
+              seen: false,
+            ),
           );
         },
       ),
@@ -269,9 +274,9 @@ class _StatusRingAvatar extends StatelessWidget {
                 ),
                 padding: const EdgeInsets.all(2.5),
                 child: Container(
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: CupertinoColors.white,
+                    color: CupertinoColors.systemBackground.resolveFrom(context),
                   ),
                   padding: const EdgeInsets.all(2),
                   child: Container(
@@ -343,8 +348,8 @@ class _StatusRingAvatar extends StatelessWidget {
             width: 64,
             child: Text(
               name,
-              style: const TextStyle(
-                  fontSize: 11.5, color: CupertinoColors.black),
+              style: TextStyle(
+                  fontSize: 11.5, color: CupertinoColors.label.resolveFrom(context)),
               textAlign: TextAlign.center,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -356,186 +361,152 @@ class _StatusRingAvatar extends StatelessWidget {
   }
 }
 
-/// Vertical list of recent story updates from Firestore
+/// Vertical list of recent story updates — receives pre-parsed data
 class _RecentStories extends StatelessWidget {
+  final List<Map<String, dynamic>> stories;
+
+  const _RecentStories({required this.stories});
+
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('stories')
-          .where('timestamp',
-              isGreaterThan: Timestamp.fromDate(
-                  DateTime.now().subtract(const Duration(hours: 24))))
-          .orderBy('timestamp', descending: true)
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Padding(
-            padding: EdgeInsets.all(32),
-            child: Center(child: CupertinoActivityIndicator()),
-          );
-        }
-
-        final List<Map<String, dynamic>> uniqueOtherStories = [];
-        final Set<String> seenSenders = {};
-        
-        for (final doc in snapshot.data!.docs) {
-          final data = doc.data() as Map<String, dynamic>;
-          final senderId = data['senderId'] as String? ?? '';
-          final senderName = data['senderName'] as String? ?? 'Unknown';
-
-          if (senderId != 'user_ankit_123') {
-            if (!seenSenders.contains(senderName)) {
-              seenSenders.add(senderName);
-              uniqueOtherStories.add(data);
-            }
-          }
-        }
-
-        if (uniqueOtherStories.isEmpty) {
-          return Padding(
-            padding: const EdgeInsets.all(32),
-            child: Center(
-              child: Text(
-                'No recent updates',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: CupertinoColors.systemGrey.withValues(alpha: 0.7),
-                ),
-              ),
+    if (stories.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(32),
+        child: Center(
+          child: Text(
+            'No recent updates',
+            style: TextStyle(
+              fontSize: 14,
+              color: CupertinoColors.systemGrey.withValues(alpha: 0.7),
             ),
-          );
-        }
+          ),
+        ),
+      );
+    }
 
-        return ListView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: uniqueOtherStories.length,
-          itemBuilder: (context, index) {
-            final data = uniqueOtherStories[index];
-            final senderName = data['senderName'] as String? ?? 'Unknown';
-            final caption = data['caption'] as String? ?? '';
-            final type = data['type'] as String? ?? 'text';
-            final profileUrl = data['profileUrl'] as String?;
-            final letter = senderName.isNotEmpty
-                ? senderName[0].toUpperCase()
-                : '?';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: stories.map((data) {
+        final senderName = data['senderName'] as String? ?? 'Unknown';
+        final caption = data['caption'] as String? ?? '';
+        final profileUrl = data['profileUrl'] as String?;
+        final letter = senderName.isNotEmpty
+            ? senderName[0].toUpperCase()
+            : '?';
 
-            return GestureDetector(
-              onTap: () {
-                if (data['url'] != null && data['url'].toString().isNotEmpty) {
-                  Navigator.push(
-                    context,
-                    CupertinoPageRoute(
-                      builder: (_) => StatusViewScreen(
-                        url: data['url'],
-                        senderName: senderName,
-                      ),
-                    ),
-                  );
-                }
-              },
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: const BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(
-                        color: CupertinoColors.separator, width: 0.5),
+        return GestureDetector(
+          onTap: () {
+            if (data['url'] != null && data['url'].toString().isNotEmpty) {
+              Navigator.push(
+                context,
+                CupertinoPageRoute(
+                  builder: (_) => StatusViewScreen(
+                    url: data['url'],
+                    senderName: senderName,
                   ),
                 ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF25D366), Color(0xFF128C7E)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        border:
-                            Border.all(color: const Color(0xFF25D366), width: 2),
-                      ),
-                      child: (profileUrl != null && profileUrl.isNotEmpty)
-                          ? ClipOval(
-                              child: Image.network(
-                                profileUrl,
-                                fit: BoxFit.cover,
-                                loadingBuilder: (context, child, loadingProgress) {
-                                  if (loadingProgress == null) return child;
-                                  return Center(
-                                    child: Text(
-                                      letter,
-                                      style: const TextStyle(
-                                        color: CupertinoColors.white,
-                                        fontSize: 18,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  );
-                                },
-                                errorBuilder: (context, error, stackTrace) =>
-                                    Center(
-                                      child: Text(
-                                        letter,
-                                        style: const TextStyle(
-                                          color: CupertinoColors.white,
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                              ),
-                            )
-                          : Center(
-                              child: Text(
-                                letter,
-                                style: const TextStyle(
-                                  color: CupertinoColors.white,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
+              );
+            }
+          },
+          child: Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: const BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                    color: CupertinoColors.separator, width: 0.5),
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF25D366), Color(0xFF128C7E)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            senderName,
+                    border:
+                        Border.all(color: const Color(0xFF25D366), width: 2),
+                  ),
+                  child: (profileUrl != null && profileUrl.isNotEmpty)
+                      ? ClipOval(
+                          child: Image.network(
+                            profileUrl,
+                            fit: BoxFit.cover,
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return Center(
+                                child: Text(
+                                  letter,
+                                  style: const TextStyle(
+                                    color: CupertinoColors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              );
+                            },
+                            errorBuilder: (context, error, stackTrace) =>
+                                Center(
+                                  child: Text(
+                                    letter,
+                                    style: const TextStyle(
+                                      color: CupertinoColors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                          ),
+                        )
+                      : Center(
+                          child: Text(
+                            letter,
                             style: const TextStyle(
-                              fontSize: 16,
+                              color: CupertinoColors.white,
+                              fontSize: 18,
                               fontWeight: FontWeight.w600,
-                              color: CupertinoColors.black,
                             ),
                           ),
-                          if (caption.isNotEmpty) ...[
-                            const SizedBox(height: 2),
-                            Text(
-                              caption,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: CupertinoColors.systemGrey,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ],
+                        ),
                 ),
-              ),
-            );
-          },
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        senderName,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: CupertinoColors.label.resolveFrom(context),
+                        ),
+                      ),
+                      if (caption.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          caption,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: CupertinoColors.systemGrey,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         );
-      },
+      }).toList(),
     );
   }
 }

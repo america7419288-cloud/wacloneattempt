@@ -10,6 +10,7 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CupertinoTabScaffold(
+      restorationId: 'home_tab_scaffold',
       tabBar: CupertinoTabBar(
         currentIndex: 2,
         activeColor: CupertinoColors.systemBlue,
@@ -36,15 +37,25 @@ class HomeScreen extends StatelessWidget {
       tabBuilder: (context, index) {
         switch (index) {
           case 0:
-            return CupertinoTabView(builder: (context) => const StatusScreen());
+            return CupertinoTabView(
+              builder: (context) => const StatusScreen(),
+            );
           case 1:
-            return CupertinoTabView(builder: (context) => const CallsScreen());
+            return CupertinoTabView(
+              builder: (context) => const CallsScreen(),
+            );
           case 2:
-            return CupertinoTabView(builder: (context) => const ChatsListScreen());
+            return CupertinoTabView(
+              builder: (context) => const ChatsListScreen(),
+            );
           case 3:
-            return CupertinoTabView(builder: (context) => const SettingsScreen());
+            return CupertinoTabView(
+              builder: (context) => const SettingsScreen(),
+            );
           default:
-            return CupertinoTabView(builder: (context) => const ChatsListScreen());
+            return CupertinoTabView(
+              builder: (context) => const ChatsListScreen(),
+            );
         }
       },
     );

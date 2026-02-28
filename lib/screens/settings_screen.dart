@@ -28,7 +28,7 @@ class SettingsScreen extends StatelessWidget {
             // Clean phone number
             final cleanPhone = phone.replaceAll(RegExp(r'[\s\-+]'), '');
             
-            final docRef = addressBookRef.doc();
+            final docRef = addressBookRef.doc(cleanPhone);
             batch.set(docRef, {
               'phone': cleanPhone,
               'name': contact.displayName,
@@ -194,7 +194,6 @@ class SettingsScreen extends StatelessWidget {
                                 style: TextStyle(
                                   fontSize: 22,
                                   fontWeight: FontWeight.w600,
-                                  color: CupertinoColors.black,
                                 ),
                               ),
                               const SizedBox(height: 2),
@@ -373,7 +372,6 @@ class _SettingsTile extends StatelessWidget {
                 title,
                 style: const TextStyle(
                   fontSize: 16,
-                  color: CupertinoColors.black,
                   fontWeight: FontWeight.w400,
                 ),
               ),

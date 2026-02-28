@@ -35,6 +35,10 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 db.settings({ ignoreUndefinedProperties: true });
 
+let reconnectDelay = 2000;
+let unsubscribers = [];
+let listenersStarted = false;
+
 // --- SUPABASE PREPARATION ---
 async function uploadToSupabaseWithRetry(path, buffer, options, retries = 3) {
     for (let i = 0; i <= retries; i++) {
@@ -53,6 +57,18 @@ async function uploadToSupabaseWithRetry(path, buffer, options, retries = 3) {
             await new Promise(res => setTimeout(res, 2000 + (i * 1000))); // Backoff
         }
     }
+}
+
+async function fetchAndStoreProfilePic(jid, sock) {
+    try {
+        const url = await sock.profilePictureUrl(jid, 'image');
+        const response = await fetch(url);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const path = `profile_pics/${jid.replace('@', '_')}.jpg`;
+        await uploadToSupabaseWithRetry(path, buffer, { contentType: 'image/jpeg', upsert: true });
+        const { data } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
+        return data.publicUrl;
+    } catch (e) { return ''; }
 }
 
 async function startWhatsApp() {
@@ -90,7 +106,9 @@ async function startWhatsApp() {
             if (!msg.key || !msg.message) continue;
             const jid = (msg.key.remoteJid || '').toLowerCase();
             const name = msg.pushName;
-            if (jid && jid !== 'status@broadcast' && name) {
+            const invalidJids = ['status@broadcast', '@newsletter', '@lid', '@broadcast'];
+            if (invalidJids.some(suffix => jid === suffix || jid.endsWith(suffix))) continue;
+            if (jid && name) {
                 contactUpdates.set(jid, name);
             }
         }
@@ -98,21 +116,27 @@ async function startWhatsApp() {
             let profileUrl = '';
             const isGroup = jid.endsWith('@g.us');
 
+            let finalName = name;
+            try {
+                const doc = await db.collection('contacts').doc(jid).get();
+                if (doc.exists && doc.data().name) {
+                    finalName = doc.data().name;
+                }
+            } catch (e) { }
+
             // --- GROUP METADATA ---
             if (isGroup) {
                 try {
                     const groupMeta = await sock.groupMetadata(jid);
                     const groupPayload = {
                         jid: jid,
-                        name: groupMeta.subject || name,
+                        name: groupMeta.subject || finalName,
                         isGroup: true,
-                        avatarLetter: (groupMeta.subject || name).charAt(0).toUpperCase(),
+                        avatarLetter: (groupMeta.subject || finalName).charAt(0).toUpperCase(),
                         onlyAdminsCanMessage: groupMeta.announce || false,
                     };
-                    try {
-                        const gpic = await sock.profilePictureUrl(jid, 'image');
-                        if (gpic) { groupPayload.profileUrl = gpic; groupPayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp(); }
-                    } catch (e) { /* no group icon */ }
+                    const gpic = await fetchAndStoreProfilePic(jid, sock);
+                    if (gpic) { groupPayload.profileUrl = gpic; groupPayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp(); }
                     await db.collection('contacts').doc(jid).set(groupPayload, { merge: true });
                 } catch (gErr) {
                     console.log(`Could not fetch group metadata for ${jid}`);
@@ -121,21 +145,11 @@ async function startWhatsApp() {
             }
 
             // --- INDIVIDUAL CONTACT ---
-            try {
-                const url = await sock.profilePictureUrl(jid, 'image');
-                if (url) profileUrl = url;
-            } catch (e) {
-                try {
-                    const previewUrl = await sock.profilePictureUrl(jid, 'preview');
-                    if (previewUrl) profileUrl = previewUrl;
-                } catch (innerE) {
-                    console.log(`No profile picture available for ${jid}`);
-                }
-            }
+            profileUrl = await fetchAndStoreProfilePic(jid, sock);
 
             const updatePayload = {
                 jid: jid,
-                name: name,
+                name: finalName,
                 avatarLetter: name.charAt(0).toUpperCase()
             };
 
@@ -166,6 +180,10 @@ async function startWhatsApp() {
 
         await updateSyncProgress(totalInBatch, 0, true);
 
+        // BULK DUPLICATE CHECK — fetch all existing msgKeyIds into a Set
+        const existingSnap = await db.collection('messages').select('msgKeyId').get();
+        const existingIds = new Set(existingSnap.docs.map(d => d.data().msgKeyId).filter(Boolean));
+
         for (const msg of filteredMessages) {
             try {
                 if (!msg.message || !msg.key || !msg.key.id) {
@@ -175,21 +193,19 @@ async function startWhatsApp() {
 
                 const msgKeyId = msg.key.id;
 
-                // DUPLICATE CHECK: skip if this message already exists
-                const existing = await db.collection('messages')
-                    .where('msgKeyId', '==', msgKeyId)
-                    .limit(1)
-                    .get();
-                if (!existing.empty) {
+                // DUPLICATE CHECK using in-memory Set
+                if (existingIds.has(msgKeyId)) {
                     processedInBatch++;
                     if (processedInBatch % 50 === 0) {
                         await updateSyncProgress(totalInBatch, processedInBatch, true);
                     }
                     continue;
                 }
+                existingIds.add(msgKeyId); // prevent duplicates within same batch
 
                 const jid = (msg.key.remoteJid || '').toLowerCase();
-                if (!jid || jid === 'status@broadcast') {
+                const invalidJids = ['status@broadcast', '@newsletter', '@lid', '@broadcast'];
+                if (!jid || invalidJids.some(suffix => jid === suffix || jid.endsWith(suffix))) {
                     processedInBatch++;
                     continue;
                 }
@@ -343,15 +359,25 @@ async function startWhatsApp() {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)
                 ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                 : true;
-            if (shouldReconnect) startWhatsApp();
+            if (shouldReconnect) {
+                console.log(`Reconnecting in ${reconnectDelay}ms...`);
+                setTimeout(() => startWhatsApp(), reconnectDelay);
+                reconnectDelay = Math.min(reconnectDelay * 2, 60000); // max 60s
+            }
         } else if (connection === 'open') {
             console.log('✅ Success! WhatsApp is connected.');
+            reconnectDelay = 2000;
+            if (listenersStarted) {
+                unsubscribers.forEach(unsub => unsub());
+                unsubscribers = [];
+            }
+            listenersStarted = true;
             // Call listeners now that connection is open
-            listenToOutbox(sock);
-            listenToAddressBook(sock);
-            listenToStoryOutbox(sock);
-            listenToCommands(sock);
-            listenToReactionOutbox(sock);
+            unsubscribers.push(listenToOutbox(sock));
+            unsubscribers.push(listenToAddressBook(sock));
+            unsubscribers.push(listenToStoryOutbox(sock));
+            unsubscribers.push(listenToCommands(sock));
+            unsubscribers.push(listenToReactionOutbox(sock));
         }
     });
 
@@ -363,24 +389,27 @@ async function startWhatsApp() {
         // Force JID to lowercase for consistency
         const jid = msg.key.remoteJid.toLowerCase();
 
+        if (jid !== 'status@broadcast') {
+            const invalidJids = ['@newsletter', '@lid', '@broadcast'];
+            if (invalidJids.some(suffix => jid.endsWith(suffix))) return;
+        }
+
         // LOOKUP: Check if we have a saved name/pic to prevent bugs
         const contactDoc = await db.collection('contacts').doc(jid).get();
-        let senderName = "";
         let savedPic = "";
         let lastPicUpdate = 0;
 
         if (contactDoc.exists) {
             const data = contactDoc.data();
-            senderName = data.name || "";
             savedPic = data.profileUrl || "";
             if (data.lastPicUpdate) {
                 lastPicUpdate = data.lastPicUpdate.toMillis();
             }
         }
 
-        if (!senderName) {
-            senderName = msg.pushName || jid.split('@')[0];
-        }
+        let senderName = contactDoc.exists
+            ? (contactDoc.data().name || msg.pushName || jid.split('@')[0])
+            : (msg.pushName || jid.split('@')[0]);
 
         // --- FETCH PROFILE PICTURE ---
         let profilePic = savedPic;
@@ -388,19 +417,9 @@ async function startWhatsApp() {
         // 24 hours = 86400000 ms
         let newlyFetchedPic = false;
         if (now - lastPicUpdate > 86400000 || !savedPic) {
-            try {
-                const url = await sock.profilePictureUrl(jid, 'image');
-                profilePic = url || "";
-                newlyFetchedPic = true;
-            } catch (e) {
-                try {
-                    const previewUrl = await sock.profilePictureUrl(jid, 'preview');
-                    profilePic = previewUrl || "";
-                    newlyFetchedPic = true;
-                } catch (innerE) {
-                    profilePic = "";
-                }
-            }
+            const url = await fetchAndStoreProfilePic(jid, sock);
+            profilePic = url || "";
+            newlyFetchedPic = true;
         }
 
         // --- HANDLE STATUS UPDATES ---
@@ -427,13 +446,17 @@ async function startWhatsApp() {
                 } catch (err) { console.error("Supabase Upload Error:", err); }
             }
 
-            await db.collection('stories').add({
-                userId: statusSender,
-                senderName: statusName,
-                text: msg.message.conversation || "",
-                url: mediaUrl,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            });
+            if (mediaUrl || msg.message.conversation) {
+                await db.collection('stories').add({
+                    senderId: statusSender,
+                    senderName: statusName,
+                    text: msg.message.conversation || "",
+                    url: mediaUrl,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                });
+            } else {
+                console.log('Skipping empty story upload');
+            }
             return;
         }
 
@@ -592,12 +615,49 @@ async function startWhatsApp() {
             }
         }
     });
+
+    // 4c. TYPING / PRESENCE INDICATORS
+    sock.ev.on('presence.update', async ({ id, presences }) => {
+        const jid = id.toLowerCase();
+        const presence = Object.values(presences)[0];
+        await db.collection('contacts').doc(jid).set({
+            presence: presence?.lastKnownPresence || 'unavailable',
+            presenceUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+    });
+
+    // 4d. MESSAGE DELETION (delete for everyone)
+    sock.ev.on('messages.update', async (updates) => {
+        for (const update of updates) {
+            if (update.update?.message === null || update.update?.messageStubType === 1) {
+                const msgKeyId = update.key?.id;
+                if (!msgKeyId) continue;
+                const snap = await db.collection('messages').where('msgKeyId', '==', msgKeyId).limit(1).get();
+                if (!snap.empty) {
+                    await snap.docs[0].ref.update({ deleted: true, text: 'This message was deleted' });
+                }
+            }
+        }
+    });
+
+    // 4e. DELIVERY AND READ RECEIPTS
+    sock.ev.on('message-receipt.update', async (updates) => {
+        for (const { key, receipt } of updates) {
+            const msgKeyId = key?.id;
+            if (!msgKeyId) continue;
+            const snap = await db.collection('messages').where('msgKeyId', '==', msgKeyId).limit(1).get();
+            if (!snap.empty) {
+                const status = receipt.receiptTimestamp ? 'read' : receipt.playedTimestamp ? 'played' : 'delivered';
+                await snap.docs[0].ref.update({ deliveryStatus: status });
+            }
+        }
+    });
 }
 
 // 5. ADDRESS BOOK SYNCER
 function listenToAddressBook(sock) {
     console.log('📖 Watching address_book for new contacts...');
-    db.collection('address_book').onSnapshot(async (snapshot) => {
+    return db.collection('address_book').onSnapshot(async (snapshot) => {
         for (const change of snapshot.docChanges()) {
             if (change.type === 'added') {
                 const { phone, name } = change.doc.data();
@@ -607,16 +667,7 @@ function listenToAddressBook(sock) {
                         const normalizedJid = result.jid.toLowerCase();
 
                         // NEW: Explicitly fetch profile picture for the contact picker
-                        let pic = "";
-                        try {
-                            pic = await sock.profilePictureUrl(normalizedJid, 'image');
-                        } catch (e) {
-                            try {
-                                pic = await sock.profilePictureUrl(normalizedJid, 'preview');
-                            } catch (innerE) {
-                                console.log(`No public profile pic for ${name}`);
-                            }
-                        }
+                        let pic = await fetchAndStoreProfilePic(normalizedJid, sock);
 
                         await db.collection('contacts').doc(normalizedJid).set({
                             jid: normalizedJid,
@@ -638,30 +689,54 @@ function listenToAddressBook(sock) {
 // 6. MESSAGE OUTBOX
 function listenToOutbox(sock) {
     console.log('📡 Listening for outgoing messages from Flutter...');
-    db.collection('outbox').where('status', '==', 'pending').onSnapshot(snapshot => {
-        snapshot.docChanges().forEach(async (change) => {
+    return db.collection('outbox').where('status', '==', 'pending').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const docId = change.doc.id;
                 try {
-                    await sock.sendMessage(data.to, { text: data.text });
-                    await db.collection('outbox').doc(docId).update({
-                        status: 'sent',
-                        sentAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
+                    let quotedMsg = undefined;
+                    if (data.replyTo && data.replyTo.msgKeyId) {
+                        try {
+                            const quotedSnap = await db.collection('messages').where('msgKeyId', '==', data.replyTo.msgKeyId).limit(1).get();
+                            if (!quotedSnap.empty) {
+                                const qData = quotedSnap.docs[0].data();
+                                quotedMsg = {
+                                    key: { id: qData.msgKeyId, fromMe: qData.isMe, remoteJid: qData.chatId },
+                                    message: { conversation: qData.text }
+                                };
+                            }
+                        } catch (e) { console.error("Could not fetch quote context:", e); }
+                    }
+
+                    const sentMsg = await sock.sendMessage(data.to, { text: data.text }, { quoted: quotedMsg });
+
+                    if (sentMsg && sentMsg.key && sentMsg.key.id) {
+                        const matchSnap = await db.collection('messages')
+                            .where('chatId', '==', data.to)
+                            .where('isMe', '==', true)
+                            .where('text', '==', data.text)
+                            .get();
+                        const match = matchSnap.docs.find(d => !d.data().msgKeyId);
+                        if (match) {
+                            await match.ref.update({ msgKeyId: sentMsg.key.id });
+                        }
+                    }
+
+                    await db.collection('outbox').doc(docId).delete();
                 } catch (error) {
                     await db.collection('outbox').doc(docId).update({ status: 'error' });
                 }
             }
-        });
+        }
     });
 }
 
 // 7. STORY OUTBOX
 function listenToStoryOutbox(sock) {
     console.log('🌟 Listening for status uploads from Flutter...');
-    db.collection('outbox_stories').where('status', '==', 'pending').onSnapshot(snapshot => {
-        snapshot.docChanges().forEach(async (change) => {
+    return db.collection('outbox_stories').where('status', '==', 'pending').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 try {
@@ -670,23 +745,20 @@ function listenToStoryOutbox(sock) {
                         image: { url: data.url },
                         caption: data.caption || ''
                     });
-                    await db.collection('outbox_stories').doc(change.doc.id).update({
-                        status: 'sent',
-                        sentAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
+                    await db.collection('outbox_stories').doc(change.doc.id).delete();
                 } catch (error) {
                     console.error("❌ Status upload failed:", error);
                     await db.collection('outbox_stories').doc(change.doc.id).update({ status: 'error' });
                 }
             }
-        });
+        }
     });
 }
 
 // 8. COMMANDS LISTENER
 function listenToCommands(sock) {
     console.log('⚡ Listening for manual sync commands...');
-    db.collection('commands').onSnapshot(async (snapshot) => {
+    return db.collection('commands').onSnapshot(async (snapshot) => {
         for (const change of snapshot.docChanges()) {
             if (change.type === 'added') {
                 const data = change.doc.data();
@@ -715,18 +787,7 @@ function listenToCommands(sock) {
                         }
 
                         // --- PROFILE PICTURE (both groups and individuals) ---
-                        let profileUrl = '';
-                        try {
-                            const url = await sock.profilePictureUrl(jid, 'image');
-                            if (url) profileUrl = url;
-                        } catch (e) {
-                            try {
-                                const previewUrl = await sock.profilePictureUrl(jid, 'preview');
-                                if (previewUrl) profileUrl = previewUrl;
-                            } catch (innerE) {
-                                console.log(`Could not fetch profile for ${jid}`);
-                            }
-                        }
+                        let profileUrl = await fetchAndStoreProfilePic(jid, sock);
 
                         if (profileUrl) {
                             updatePayload.profileUrl = profileUrl;
@@ -749,8 +810,8 @@ function listenToCommands(sock) {
 // 9. REACTION OUTBOX LISTENER
 function listenToReactionOutbox(sock) {
     console.log('😀 Listening for outgoing reactions...');
-    db.collection('outbox_reactions').where('status', '==', 'pending').onSnapshot(snapshot => {
-        snapshot.docChanges().forEach(async (change) => {
+    return db.collection('outbox_reactions').where('status', '==', 'pending').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
             if (change.type === 'added') {
                 const data = change.doc.data();
                 try {
@@ -771,7 +832,7 @@ function listenToReactionOutbox(sock) {
                     await change.doc.ref.update({ status: 'error' });
                 }
             }
-        });
+        }
     });
 }
 
