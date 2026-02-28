@@ -267,7 +267,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                     );
                   },
                   childCount: docs.length,
-                  ),
+                ),
+              );
               },
             ),
           ],
