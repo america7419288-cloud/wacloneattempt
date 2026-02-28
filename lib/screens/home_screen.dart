@@ -4,15 +4,34 @@ import 'calls_screen.dart';
 import 'chats_list_screen.dart';
 import 'settings_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  late CupertinoTabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = CupertinoTabController(initialIndex: 2);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return CupertinoTabScaffold(
+      controller: _tabController,
       restorationId: 'home_tab_scaffold',
       tabBar: CupertinoTabBar(
-        currentIndex: 2,
         activeColor: CupertinoColors.systemBlue,
         inactiveColor: CupertinoColors.systemGrey,
         items: [

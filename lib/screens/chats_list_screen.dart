@@ -153,41 +153,44 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
             ),
           ),
           // Real-time chat list from Firestore contacts collection
-          SliverToBoxAdapter(
-            child: StreamBuilder<QuerySnapshot>(
+          StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
                   .collection('contacts')
                   .orderBy('timestamp', descending: true)
                   .snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
-                  return Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(CupertinoIcons.exclamationmark_triangle,
-                              size: 40, color: CupertinoColors.systemRed),
-                          const SizedBox(height: 12),
-                          Text(
-                            'Error loading chats:\n${snapshot.error}',
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: CupertinoColors.systemGrey,
+                  return SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(CupertinoIcons.exclamationmark_triangle,
+                                size: 40, color: CupertinoColors.systemRed),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Error loading chats:\n${snapshot.error}',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: CupertinoColors.systemGrey,
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   );
                 }
 
                 if (!snapshot.hasData) {
-                  return const Padding(
-                    padding: EdgeInsets.all(48),
-                    child: Center(child: CupertinoActivityIndicator()),
+                  return const SliverToBoxAdapter(
+                    child: Padding(
+                      padding: EdgeInsets.all(48),
+                      child: Center(child: CupertinoActivityIndicator()),
+                    ),
                   );
                 }
 
@@ -209,40 +212,39 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                 }
 
                 if (docs.isEmpty) {
-                  return Padding(
-                    padding: const EdgeInsets.all(48),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(CupertinoIcons.chat_bubble_2,
-                              size: 56,
-                              color: CupertinoColors.systemGrey
-                                  .withValues(alpha: 0.4)),
-                          const SizedBox(height: 12),
-                          Text(
-                            _searchQuery.isEmpty
-                                ? 'No conversations yet'
-                                : 'No matching chats',
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: CupertinoColors.systemGrey
-                                  .withValues(alpha: 0.7),
+                  return SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(48),
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(CupertinoIcons.chat_bubble_2,
+                                size: 56,
+                                color: CupertinoColors.systemGrey
+                                    .withValues(alpha: 0.4)),
+                            const SizedBox(height: 12),
+                            Text(
+                              _searchQuery.isEmpty
+                                  ? 'No conversations yet'
+                                  : 'No matching chats',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: CupertinoColors.systemGrey
+                                    .withValues(alpha: 0.7),
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   );
                 }
 
-                return ListView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: docs.length,
-                  itemBuilder: (context, index) {
+                return SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
                     final data = docs[index].data() as Map<String, dynamic>;
-                    // doc.id is the JID (set by index.js via db.collection('contacts').doc(jid).set(...))
                     final jid = docs[index].id;
                     final name = data['name'] as String? ?? jid.split('@')[0];
                     final lastMessage = data['lastMessage'] as String? ?? '';
@@ -264,14 +266,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                       isGroup: isGroup,
                     );
                   },
-                );
+                  childCount: docs.length,
+                  ),
               },
             ),
-          ),
-        ],
-      ),
-    );
-  }
+          ],
+        ),
+      );
+    }
 
   Widget _quickAction(IconData icon, String label) {
     return CupertinoButton(

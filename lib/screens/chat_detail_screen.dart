@@ -33,6 +33,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   Map<String, dynamic>? _replyingTo;
+  bool _showScrollToBottom = false;
 
   @override
   void initState() {
@@ -41,6 +42,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         .collection('contacts')
         .doc(widget.contactJid)
         .set({'unreadCount': 0}, SetOptions(merge: true));
+    _scrollController.addListener(() {
+      final show = _scrollController.offset > 200;
+      if (show != _showScrollToBottom) {
+        setState(() => _showScrollToBottom = show);
+      }
+    });
   }
 
   void _sendMessage() {
@@ -48,12 +55,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     if (text.isEmpty) return;
 
     final jid = widget.contactJid;
+    final localId = '${DateTime.now().millisecondsSinceEpoch}_${jid.hashCode}';
 
     final msgPayload = <String, dynamic>{
       'chatId': jid,
       'text': text,
       'from': 'me',
       'isMe': true,
+      'localId': localId,
       'timestamp': FieldValue.serverTimestamp(),
     };
     if (_replyingTo != null) {
@@ -67,6 +76,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final outboxPayload = <String, dynamic>{
       'to': jid,
       'text': text,
+      'localId': localId,
       'status': 'pending',
       'timestamp': FieldValue.serverTimestamp(),
     };
@@ -338,7 +348,46 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           children: [
             // Messages area
             Expanded(
-              child: _buildMessageList(),
+              child: Stack(
+                children: [
+                  _buildMessageList(),
+                  if (_showScrollToBottom)
+                    Positioned(
+                      bottom: 8,
+                      right: 8,
+                      child: CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          _scrollController.animateTo(
+                            0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeOut,
+                          );
+                        },
+                        child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemBackground.resolveFrom(context),
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: CupertinoColors.systemGrey.withValues(alpha: 0.3),
+                                blurRadius: 4,
+                                offset: const Offset(0, 2),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.arrow_down_circle_fill,
+                            color: CupertinoColors.systemGrey,
+                            size: 32,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
             // Input bar (with admin restriction)
             _buildRestrictedInputBar(),
@@ -475,82 +524,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             }
 
             final docId = docs[index].id;
-            double swipeOffset = 0;
-            bool _didTriggerHaptic = false;
 
             return Column(
               children: [
                 if (dateHeader != null) dateHeader,
-                StatefulBuilder(
-                  builder: (context, setLocalState) {
-                    return GestureDetector(
-                      onHorizontalDragUpdate: (details) {
-                        final delta = isOutgoing ? -details.delta.dx : details.delta.dx;
-                        if (delta > 0 || swipeOffset > 0) {
-                          setLocalState(() {
-                            swipeOffset = (swipeOffset + delta).clamp(0.0, 70.0);
-                            if (swipeOffset > 40 && !_didTriggerHaptic) {
-                              _didTriggerHaptic = true;
-                              HapticFeedback.mediumImpact();
-                            } else if (swipeOffset <= 40) {
-                              _didTriggerHaptic = false;
-                            }
-                          });
-                        }
-                      },
-                      onHorizontalDragEnd: (_) async {
-                        if (swipeOffset > 40) _setReply(data);
-                        // Animate snap back
-                        while (swipeOffset > 0) {
-                          await Future.delayed(const Duration(milliseconds: 16));
-                          if (!context.mounted) break;
-                          setLocalState(() {
-                            swipeOffset = (swipeOffset - 15).clamp(0.0, 70.0);
-                          });
-                        }
-                        if (context.mounted) {
-                          setLocalState(() {
-                            swipeOffset = 0;
-                            _didTriggerHaptic = false;
-                          });
-                        }
-                      },
-                      onLongPress: () {
-                        if (data['deleted'] == true) return;
-                        _showLongPressMenu(context, data, docId);
-                      },
-                      onDoubleTap: () {
-                        if (data['deleted'] == true) return;
-                        _showReactionPicker(context, data);
-                      },
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: Stack(
-                          alignment: isOutgoing ? Alignment.centerLeft : Alignment.centerRight,
-                          children: [
-                            if (swipeOffset > 10)
-                              Opacity(
-                                opacity: (swipeOffset / 60).clamp(0.0, 1.0),
-                                child: const Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 16),
-                                  child: Icon(CupertinoIcons.reply, color: CupertinoColors.systemGrey, size: 22),
-                                ),
-                              ),
-                            Align(
-                              alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-                              child: Transform.translate(
-                                offset: Offset(isOutgoing ? -swipeOffset : swipeOffset, 0),
-                                child: _ChatBubble(
-                                  data: data,
-                                  time: timeStr,
-                                  isOutgoing: isOutgoing,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
+                _SwipableBubbleRow(
+                  data: data,
+                  time: timeStr,
+                  isOutgoing: isOutgoing,
+                  docId: docId,
+                  onReply: _setReply,
+                  onLongPress: () {
+                    if (data['deleted'] == true) return;
+                    _showLongPressMenu(context, data, docId);
+                  },
+                  onDoubleTap: () {
+                    if (data['deleted'] == true) return;
+                    _showReactionPicker(context, data);
                   },
                 ),
               ],
@@ -713,6 +703,100 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 }
 
+// --- SWIPABLE BUBBLE ROW ---
+class _SwipableBubbleRow extends StatefulWidget {
+  final Map<String, dynamic> data;
+  final String time;
+  final bool isOutgoing;
+  final String docId;
+  final void Function(Map<String, dynamic>) onReply;
+  final VoidCallback onLongPress;
+  final VoidCallback onDoubleTap;
+
+  const _SwipableBubbleRow({
+    required this.data,
+    required this.time,
+    required this.isOutgoing,
+    required this.docId,
+    required this.onReply,
+    required this.onLongPress,
+    required this.onDoubleTap,
+  });
+
+  @override
+  State<_SwipableBubbleRow> createState() => _SwipableBubbleRowState();
+}
+
+class _SwipableBubbleRowState extends State<_SwipableBubbleRow> {
+  double swipeOffset = 0;
+  bool didTriggerHaptic = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onHorizontalDragUpdate: (details) {
+        final delta = widget.isOutgoing ? -details.delta.dx : details.delta.dx;
+        if (delta > 0 || swipeOffset > 0) {
+          setState(() {
+            swipeOffset = (swipeOffset + delta).clamp(0.0, 70.0);
+            if (swipeOffset > 40 && !didTriggerHaptic) {
+              didTriggerHaptic = true;
+              HapticFeedback.mediumImpact();
+            } else if (swipeOffset <= 40) {
+              didTriggerHaptic = false;
+            }
+          });
+        }
+      },
+      onHorizontalDragEnd: (_) async {
+        if (swipeOffset > 40) widget.onReply(widget.data);
+        while (swipeOffset > 0) {
+          await Future.delayed(const Duration(milliseconds: 16));
+          if (!mounted) break;
+          setState(() {
+            swipeOffset = (swipeOffset - 15).clamp(0.0, 70.0);
+          });
+        }
+        if (mounted) {
+          setState(() {
+            swipeOffset = 0;
+            didTriggerHaptic = false;
+          });
+        }
+      },
+      onLongPress: widget.onLongPress,
+      onDoubleTap: widget.onDoubleTap,
+      child: SizedBox(
+        width: double.infinity,
+        child: Stack(
+          alignment: widget.isOutgoing ? Alignment.centerLeft : Alignment.centerRight,
+          children: [
+            if (swipeOffset > 10)
+              Opacity(
+                opacity: (swipeOffset / 60).clamp(0.0, 1.0),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Icon(CupertinoIcons.reply, color: CupertinoColors.systemGrey, size: 22),
+                ),
+              ),
+            Align(
+              alignment: widget.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+              child: Transform.translate(
+                offset: Offset(widget.isOutgoing ? -swipeOffset : swipeOffset, 0),
+                child: _ChatBubble(
+                  data: widget.data,
+                  time: widget.time,
+                  isOutgoing: widget.isOutgoing,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ChatBubble extends StatelessWidget {
   final Map<String, dynamic> data;
   final String time;
@@ -863,9 +947,13 @@ class _ChatBubble extends StatelessWidget {
   Widget _buildReplyPreview(Map<String, dynamic> replyTo) {
     final quotedText = replyTo['text'] as String? ?? '';
     final quotedAuthor = replyTo['author'] as String? ?? '';
-    final displayAuthor = quotedAuthor.isNotEmpty
-        ? quotedAuthor.split('@')[0]
-        : 'Unknown';
+    // Show 'You' for own messages, otherwise use the name as-is (now resolved by bridge)
+    final isOwnNumber = RegExp(r'^\d+$').hasMatch(quotedAuthor);
+    final displayAuthor = quotedAuthor.isEmpty
+        ? 'Unknown'
+        : isOwnNumber
+            ? 'You'
+            : quotedAuthor;
     return ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: 52),
       child: Container(

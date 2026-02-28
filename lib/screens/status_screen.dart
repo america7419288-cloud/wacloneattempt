@@ -93,8 +93,8 @@ class StatusScreen extends StatelessWidget {
               if (senderId == kOwnJid) {
                 myLatestStoryUrl ??= data['url'] as String?;
               } else {
-                if (!seenSenders.contains(senderName)) {
-                  seenSenders.add(senderName);
+                if (!seenSenders.contains(senderId)) {
+                  seenSenders.add(senderId);
                   otherStories.add(data);
                 }
               }

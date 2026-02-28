@@ -313,7 +313,7 @@ class _SettingsSection extends StatelessWidget {
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       decoration: BoxDecoration(
-        color: CupertinoColors.white,
+        color: CupertinoColors.secondarySystemGroupedBackground.resolveFrom(context),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(

@@ -237,9 +237,19 @@ async function startWhatsApp() {
                         || ctxInfo.quotedMessage.extendedTextMessage?.text
                         || ctxInfo.quotedMessage.imageMessage?.caption
                         || '';
+                    const authorJid = ctxInfo.participant || '';
+                    let authorName = authorJid.split('@')[0];
+                    if (authorJid) {
+                        try {
+                            const authorDoc = await db.collection('contacts').doc(authorJid).get();
+                            if (authorDoc.exists && authorDoc.data().name) {
+                                authorName = authorDoc.data().name;
+                            }
+                        } catch (e) { /* skip lookup */ }
+                    }
                     docData.replyTo = {
                         text: quotedText,
-                        author: ctxInfo.participant || '',
+                        author: authorName,
                     };
                 }
 
@@ -326,7 +336,6 @@ async function startWhatsApp() {
                 // Update contact entry for last message
                 await db.collection('contacts').doc(jid).set({
                     jid: jid,
-                    name: senderName,
                     lastMessage: docData.text || `[${docData.type || 'media'}]`,
                     timestamp: docData.timestamp,
                     avatarLetter: senderName.charAt(0).toUpperCase(),
@@ -383,203 +392,214 @@ async function startWhatsApp() {
 
     // 4. INCOMING MESSAGES & IDENTITY SYNC
     sock.ev.on('messages.upsert', async ({ messages }) => {
-        const msg = messages[0];
-        if (!msg.message) return;
+        for (const msg of messages) {
+            if (!msg || !msg.message) continue;
 
-        // Force JID to lowercase for consistency
-        const jid = msg.key.remoteJid.toLowerCase();
+            // Force JID to lowercase for consistency
+            const jid = msg.key.remoteJid.toLowerCase();
 
-        if (jid !== 'status@broadcast') {
-            const invalidJids = ['@newsletter', '@lid', '@broadcast'];
-            if (invalidJids.some(suffix => jid.endsWith(suffix))) return;
-        }
-
-        // LOOKUP: Check if we have a saved name/pic to prevent bugs
-        const contactDoc = await db.collection('contacts').doc(jid).get();
-        let savedPic = "";
-        let lastPicUpdate = 0;
-
-        if (contactDoc.exists) {
-            const data = contactDoc.data();
-            savedPic = data.profileUrl || "";
-            if (data.lastPicUpdate) {
-                lastPicUpdate = data.lastPicUpdate.toMillis();
-            }
-        }
-
-        let senderName = contactDoc.exists
-            ? (contactDoc.data().name || msg.pushName || jid.split('@')[0])
-            : (msg.pushName || jid.split('@')[0]);
-
-        // --- FETCH PROFILE PICTURE ---
-        let profilePic = savedPic;
-        const now = Date.now();
-        // 24 hours = 86400000 ms
-        let newlyFetchedPic = false;
-        if (now - lastPicUpdate > 86400000 || !savedPic) {
-            const url = await fetchAndStoreProfilePic(jid, sock);
-            profilePic = url || "";
-            newlyFetchedPic = true;
-        }
-
-        // --- HANDLE STATUS UPDATES ---
-        if (jid === 'status@broadcast') {
-            if (msg.key.fromMe) return;
-            const statusSender = msg.key.participant || "";
-            const statusName = msg.pushName || (statusSender ? statusSender.split('@')[0] : "Unknown Status");
-            let mediaUrl = "";
-
-            const type = Object.keys(msg.message)[0];
-            if (type === 'imageMessage' || type === 'videoMessage') {
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    const storyContentType = type === 'videoMessage' ? 'video/mp4' : 'image/jpeg';
-                    const storyPath = `stories/${msg.key.id}_${Date.now()}`;
-                    await uploadToSupabaseWithRetry(storyPath, buffer, {
-                        contentType: storyContentType,
-                        upsert: true,
-                    });
-                    const { data: storyUrlData } = supabase.storage
-                        .from(SUPABASE_BUCKET)
-                        .getPublicUrl(storyPath);
-                    mediaUrl = storyUrlData?.publicUrl || "";
-                } catch (err) { console.error("Supabase Upload Error:", err); }
+            if (jid !== 'status@broadcast') {
+                const invalidJids = ['@newsletter', '@lid', '@broadcast'];
+                if (invalidJids.some(suffix => jid.endsWith(suffix))) continue;
             }
 
-            if (mediaUrl || msg.message.conversation) {
-                await db.collection('stories').add({
-                    senderId: statusSender,
-                    senderName: statusName,
-                    text: msg.message.conversation || "",
-                    url: mediaUrl,
-                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                });
-            } else {
-                console.log('Skipping empty story upload');
-            }
-            return;
-        }
+            // LOOKUP: Check if we have a saved name/pic to prevent bugs
+            const contactDoc = await db.collection('contacts').doc(jid).get();
+            let savedPic = "";
+            let lastPicUpdate = 0;
 
-        // --- HANDLE REGULAR & MEDIA MESSAGES ---
-        const type = Object.keys(msg.message)[0];
-        const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-        const msgKeyId = msg.key.id || '';
-
-        if (msgKeyId) {
-            const existing = await db.collection('messages')
-                .where('msgKeyId', '==', msgKeyId)
-                .limit(1)
-                .get();
-            if (!existing.empty) return;
-        }
-
-        if (text || mediaTypes.includes(type)) {
-            const msgData = {
-                chatId: jid,
-                from: jid,
-                senderName: senderName,
-                isMe: msg.key.fromMe,
-                msgKeyId: msgKeyId,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-            };
-
-            // --- REPLY CONTEXT ---
-            const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
-            if (ctxInfo && ctxInfo.quotedMessage) {
-                const quotedText = ctxInfo.quotedMessage.conversation
-                    || ctxInfo.quotedMessage.extendedTextMessage?.text
-                    || ctxInfo.quotedMessage.imageMessage?.caption
-                    || '';
-                msgData.replyTo = {
-                    text: quotedText,
-                    author: ctxInfo.participant || '',
-                };
-            }
-
-            if (mediaTypes.includes(type)) {
-                const typeMap = {
-                    imageMessage: 'image',
-                    videoMessage: 'video',
-                    audioMessage: 'audio',
-                    documentMessage: 'file',
-                };
-                msgData.type = typeMap[type];
-                msgData.text = msg.message[type]?.caption || '';
-                if (type === 'documentMessage') {
-                    msgData.fileName = msg.message[type]?.fileName || 'document';
+            if (contactDoc.exists) {
+                const data = contactDoc.data();
+                savedPic = data.profileUrl || "";
+                if (data.lastPicUpdate) {
+                    lastPicUpdate = data.lastPicUpdate.toMillis();
                 }
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    const rtContentTypeMap = {
-                        imageMessage: 'image/jpeg',
-                        videoMessage: 'video/mp4',
-                        audioMessage: 'audio/ogg',
-                        documentMessage: 'application/octet-stream',
-                    };
-                    const rtPath = `wa_media/${msg.key.id}_${Date.now()}`;
-                    await uploadToSupabaseWithRetry(rtPath, buffer, {
-                        contentType: rtContentTypeMap[type] || 'application/octet-stream',
-                        upsert: true,
-                    });
-                    const { data: rtUrlData } = supabase.storage
-                        .from(SUPABASE_BUCKET)
-                        .getPublicUrl(rtPath);
-                    msgData.mediaUrl = rtUrlData?.publicUrl || '';
-                } catch (mediaErr) {
-                    console.error('⚠️ Real-time media upload failed:', mediaErr.message);
-                    msgData.mediaUrl = '';
-                }
-            } else {
-                msgData.text = text;
+            }
 
-                // --- LINK PREVIEW ---
-                const linkUrl = extractUrl(text);
-                if (linkUrl) {
+            let senderName = contactDoc.exists
+                ? (contactDoc.data().name || msg.pushName || jid.split('@')[0])
+                : (msg.pushName || jid.split('@')[0]);
+
+            // --- FETCH PROFILE PICTURE ---
+            let profilePic = savedPic;
+            const now = Date.now();
+            // 24 hours = 86400000 ms
+            let newlyFetchedPic = false;
+            if (now - lastPicUpdate > 86400000 || !savedPic) {
+                const url = await fetchAndStoreProfilePic(jid, sock);
+                profilePic = url || "";
+                newlyFetchedPic = true;
+            }
+
+            // --- HANDLE STATUS UPDATES ---
+            if (jid === 'status@broadcast') {
+                if (msg.key.fromMe) return;
+                const statusSender = msg.key.participant || "";
+                const statusName = msg.pushName || (statusSender ? statusSender.split('@')[0] : "Unknown Status");
+                let mediaUrl = "";
+
+                const type = Object.keys(msg.message)[0];
+                if (type === 'imageMessage' || type === 'videoMessage') {
                     try {
-                        const preview = await getLinkPreview(linkUrl, { timeout: 5000 });
-                        msgData.linkPreview = {
-                            title: preview.title || '',
-                            description: preview.description || '',
-                            image: (preview.images && preview.images[0]) || preview.favicons?.[0] || '',
-                            url: linkUrl,
-                        };
-                    } catch (lpErr) { /* skip */ }
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                        const storyContentType = type === 'videoMessage' ? 'video/mp4' : 'image/jpeg';
+                        const storyPath = `stories/${msg.key.id}_${Date.now()}`;
+                        await uploadToSupabaseWithRetry(storyPath, buffer, {
+                            contentType: storyContentType,
+                            upsert: true,
+                        });
+                        const { data: storyUrlData } = supabase.storage
+                            .from(SUPABASE_BUCKET)
+                            .getPublicUrl(storyPath);
+                        mediaUrl = storyUrlData?.publicUrl || "";
+                    } catch (err) { console.error("Supabase Upload Error:", err); }
                 }
+
+                if (mediaUrl || msg.message.conversation) {
+                    await db.collection('stories').add({
+                        senderId: statusSender,
+                        senderName: statusName,
+                        text: msg.message.conversation || "",
+                        url: mediaUrl,
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    });
+                } else {
+                    console.log('Skipping empty story upload');
+                }
+                return;
             }
 
-            await db.collection('messages').add(msgData);
+            // --- HANDLE REGULAR & MEDIA MESSAGES ---
+            const type = Object.keys(msg.message)[0];
+            const mediaTypes = ['imageMessage', 'videoMessage', 'audioMessage', 'documentMessage'];
+            const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+            const msgKeyId = msg.key.id || '';
 
-            const lastMsgPreview = msgData.text || `[${msgData.type || 'media'}]`;
-            const isGroup = jid.endsWith('@g.us');
-            const updatePayload = {
-                jid: jid,
-                name: senderName,
-                profileUrl: profilePic,
-                lastMessage: lastMsgPreview,
-                timestamp: admin.firestore.FieldValue.serverTimestamp(),
-                avatarLetter: senderName.charAt(0).toUpperCase()
-            };
-            if (newlyFetchedPic) {
-                updatePayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp();
-            }
-            // Detect groups in real-time
-            if (isGroup) {
-                updatePayload.isGroup = true;
-                try {
-                    const gm = await sock.groupMetadata(jid);
-                    updatePayload.name = gm.subject || senderName;
-                    updatePayload.onlyAdminsCanMessage = gm.announce || false;
-                    updatePayload.avatarLetter = (gm.subject || senderName).charAt(0).toUpperCase();
-                } catch (e) { /* skip metadata fetch error */ }
-            }
-            // Increment unread count for incoming messages
-            if (!msg.key.fromMe) {
-                updatePayload.unreadCount = admin.firestore.FieldValue.increment(1);
+            if (msgKeyId) {
+                const existing = await db.collection('messages')
+                    .where('msgKeyId', '==', msgKeyId)
+                    .limit(1)
+                    .get();
+                if (!existing.empty) return;
             }
 
-            await db.collection('contacts').doc(jid).set(updatePayload, { merge: true });
-        }
+            if (text || mediaTypes.includes(type)) {
+                const msgData = {
+                    chatId: jid,
+                    from: jid,
+                    senderName: senderName,
+                    isMe: msg.key.fromMe,
+                    msgKeyId: msgKeyId,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                };
+
+                // --- REPLY CONTEXT ---
+                const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
+                if (ctxInfo && ctxInfo.quotedMessage) {
+                    const quotedText = ctxInfo.quotedMessage.conversation
+                        || ctxInfo.quotedMessage.extendedTextMessage?.text
+                        || ctxInfo.quotedMessage.imageMessage?.caption
+                        || '';
+                    const authorJid = ctxInfo.participant || '';
+                    let rtAuthorName = authorJid.split('@')[0];
+                    if (authorJid) {
+                        try {
+                            const authorDoc = await db.collection('contacts').doc(authorJid).get();
+                            if (authorDoc.exists && authorDoc.data().name) {
+                                rtAuthorName = authorDoc.data().name;
+                            }
+                        } catch (e) { /* skip lookup */ }
+                    }
+                    msgData.replyTo = {
+                        text: quotedText,
+                        author: rtAuthorName,
+                    };
+                }
+
+                if (mediaTypes.includes(type)) {
+                    const typeMap = {
+                        imageMessage: 'image',
+                        videoMessage: 'video',
+                        audioMessage: 'audio',
+                        documentMessage: 'file',
+                    };
+                    msgData.type = typeMap[type];
+                    msgData.text = msg.message[type]?.caption || '';
+                    if (type === 'documentMessage') {
+                        msgData.fileName = msg.message[type]?.fileName || 'document';
+                    }
+                    try {
+                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                        const rtContentTypeMap = {
+                            imageMessage: 'image/jpeg',
+                            videoMessage: 'video/mp4',
+                            audioMessage: 'audio/ogg',
+                            documentMessage: 'application/octet-stream',
+                        };
+                        const rtPath = `wa_media/${msg.key.id}_${Date.now()}`;
+                        await uploadToSupabaseWithRetry(rtPath, buffer, {
+                            contentType: rtContentTypeMap[type] || 'application/octet-stream',
+                            upsert: true,
+                        });
+                        const { data: rtUrlData } = supabase.storage
+                            .from(SUPABASE_BUCKET)
+                            .getPublicUrl(rtPath);
+                        msgData.mediaUrl = rtUrlData?.publicUrl || '';
+                    } catch (mediaErr) {
+                        console.error('⚠️ Real-time media upload failed:', mediaErr.message);
+                        msgData.mediaUrl = '';
+                    }
+                } else {
+                    msgData.text = text;
+
+                    // --- LINK PREVIEW ---
+                    const linkUrl = extractUrl(text);
+                    if (linkUrl) {
+                        try {
+                            const preview = await getLinkPreview(linkUrl, { timeout: 5000 });
+                            msgData.linkPreview = {
+                                title: preview.title || '',
+                                description: preview.description || '',
+                                image: (preview.images && preview.images[0]) || preview.favicons?.[0] || '',
+                                url: linkUrl,
+                            };
+                        } catch (lpErr) { /* skip */ }
+                    }
+                }
+
+                await db.collection('messages').add(msgData);
+
+                const lastMsgPreview = msgData.text || `[${msgData.type || 'media'}]`;
+                const isGroup = jid.endsWith('@g.us');
+                const updatePayload = {
+                    jid: jid,
+                    name: senderName,
+                    profileUrl: profilePic,
+                    lastMessage: lastMsgPreview,
+                    timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    avatarLetter: senderName.charAt(0).toUpperCase()
+                };
+                if (newlyFetchedPic) {
+                    updatePayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp();
+                }
+                // Detect groups in real-time
+                if (isGroup) {
+                    updatePayload.isGroup = true;
+                    try {
+                        const gm = await sock.groupMetadata(jid);
+                        updatePayload.name = gm.subject || senderName;
+                        updatePayload.onlyAdminsCanMessage = gm.announce || false;
+                        updatePayload.avatarLetter = (gm.subject || senderName).charAt(0).toUpperCase();
+                    } catch (e) { /* skip metadata fetch error */ }
+                }
+                // Increment unread count for incoming messages
+                if (!msg.key.fromMe) {
+                    updatePayload.unreadCount = admin.firestore.FieldValue.increment(1);
+                }
+
+                await db.collection('contacts').doc(jid).set(updatePayload, { merge: true });
+            }
+        } // end for-loop over messages
     });
 
     // 4b. REACTIONS LISTENER

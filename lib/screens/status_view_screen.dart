@@ -21,6 +21,7 @@ class _StatusViewScreenState extends State<StatusViewScreen>
     with SingleTickerProviderStateMixin {
   late AnimationController _progressController;
   Timer? _timer;
+  bool _imageLoaded = false;
 
   @override
   void initState() {
@@ -33,8 +34,9 @@ class _StatusViewScreenState extends State<StatusViewScreen>
         setState(() {});
       });
 
-    _progressController.forward().whenComplete(() {
-      if (mounted) {
+    // Don't start forward() here — wait until image loads
+    _progressController.addStatusListener((status) {
+      if (status == AnimationStatus.completed && mounted) {
         if (widget.onFinished != null) {
           widget.onFinished!();
         }
@@ -76,7 +78,16 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                   widget.url,
                   fit: BoxFit.contain,
                   loadingBuilder: (context, child, loadingProgress) {
-                    if (loadingProgress == null) return child;
+                    if (loadingProgress == null) {
+                      // Image loaded — start the progress timer
+                      if (!_imageLoaded) {
+                        _imageLoaded = true;
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) _progressController.forward();
+                        });
+                      }
+                      return child;
+                    }
                     return const Center(
                       child: CupertinoActivityIndicator(
                         color: CupertinoColors.white,
