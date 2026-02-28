@@ -1,6 +1,8 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'chat_detail_screen.dart';
 
 class ContactPickerScreen extends StatefulWidget {
   const ContactPickerScreen({super.key});
@@ -30,7 +32,8 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
       return;
     }
 
-    final contacts = await FlutterContacts.getContacts(withProperties: true);
+    final contacts = await FlutterContacts.getContacts(
+        withProperties: true, withPhoto: true);
     setState(() {
       _contacts = contacts;
       _isLoading = false;
@@ -45,6 +48,7 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
 
     final phone = contact.phones.first.number;
     final cleanPhone = phone.replaceAll(RegExp(r'[\s\-+()]'), '');
+    final fullJid = '$cleanPhone@s.whatsapp.net'.toLowerCase();
 
     try {
       await FirebaseFirestore.instance.collection('address_book').add({
@@ -54,7 +58,18 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
       });
 
       if (mounted) {
-        Navigator.pop(context);
+        Navigator.pushReplacement(
+          context,
+          CupertinoPageRoute(
+            builder: (_) => ChatDetailScreen(
+              contactJid: fullJid,
+              contactName: contact.displayName,
+              avatarLetter: contact.displayName.isNotEmpty
+                  ? contact.displayName[0].toUpperCase()
+                  : '?',
+            ),
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -83,6 +98,7 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
+        transitionBetweenRoutes: false,
         middle: const Text('Select Contact'),
         leading: CupertinoButton(
           padding: EdgeInsets.zero,
@@ -133,6 +149,8 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
         final phone = contact.phones.isNotEmpty
             ? contact.phones.first.number
             : 'No number';
+        final cleanPhone = phone.replaceAll(RegExp(r'[\s\-+()]'), '');
+        final jid = '$cleanPhone@s.whatsapp.net'.toLowerCase();
         final letter = contact.displayName.isNotEmpty
             ? contact.displayName[0].toUpperCase()
             : '?';
@@ -151,28 +169,47 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
             ),
             child: Row(
               children: [
-                Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      colors: [
-                        CupertinoColors.systemGrey.withValues(alpha: 0.4),
-                        CupertinoColors.systemGrey2.withValues(alpha: 0.6),
-                      ],
-                    ),
-                  ),
-                  child: Center(
-                    child: Text(
-                      letter,
-                      style: const TextStyle(
-                        color: CupertinoColors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
+                StreamBuilder<DocumentSnapshot>(
+                  stream: FirebaseFirestore.instance
+                      .collection('contacts')
+                      .doc(jid)
+                      .snapshots(),
+                  builder: (context, snapshot) {
+                    String? networkProfileUrl;
+                    if (snapshot.hasData && snapshot.data!.exists) {
+                      final data = snapshot.data!.data() as Map<String, dynamic>?;
+                      networkProfileUrl = data?['profileUrl'] as String?;
+                    }
+
+                    Widget avatarWidget;
+                    // Priority 1: Network Image from WhatsApp (via Firestore)
+                    if (networkProfileUrl != null && networkProfileUrl.isNotEmpty) {
+                      avatarWidget = ClipOval(
+                        child: CachedNetworkImage(
+                          imageUrl: networkProfileUrl,
+                          fit: BoxFit.cover,
+                          placeholder: (context, url) => _buildFallback(letter),
+                          errorWidget: (context, url, error) => _buildFallback(letter),
+                        ),
+                      );
+                    } 
+                    // Priority 2: Local Device Photo (as fallback)
+                    else if (contact.photo != null) {
+                      avatarWidget = ClipOval(
+                        child: Image.memory(contact.photo!, fit: BoxFit.cover),
+                      );
+                    } 
+                    // Priority 3: Letter Avatar
+                    else {
+                      avatarWidget = _buildFallback(letter);
+                    }
+
+                    return SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: avatarWidget,
+                    );
+                  },
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -205,6 +242,29 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
           ),
         );
       },
+    );
+  }
+  Widget _buildFallback(String letter) {
+    return Container(
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: [
+            CupertinoColors.systemGrey.withValues(alpha: 0.4),
+            CupertinoColors.systemGrey2.withValues(alpha: 0.6),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Text(
+          letter,
+          style: const TextStyle(
+            color: CupertinoColors.white,
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
     );
   }
 }

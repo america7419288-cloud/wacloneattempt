@@ -1,4 +1,6 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart' show LinearProgressIndicator, AlwaysStoppedAnimation;
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'chat_detail_screen.dart';
 import 'contact_picker_screen.dart';
@@ -23,6 +25,89 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           const CupertinoSliverNavigationBar(
             largeTitle: Text('Chats'),
             trailing: _ComposeButton(),
+          ),
+          // Sync progress banner
+          SliverToBoxAdapter(
+            child: StreamBuilder<DocumentSnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('app_status')
+                  .doc('sync_progress')
+                  .snapshots(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData || !snapshot.data!.exists) {
+                  return const SizedBox.shrink();
+                }
+                final data =
+                    snapshot.data!.data() as Map<String, dynamic>? ?? {};
+                final isSyncing = data['isSyncing'] as bool? ?? false;
+                if (!isSyncing) return const SizedBox.shrink();
+
+                final total = (data['totalMessages'] as num?)?.toInt() ?? 1;
+                final processed =
+                    (data['processedMessages'] as num?)?.toInt() ?? 0;
+                final progress = total > 0 ? processed / total : 0.0;
+
+                return Container(
+                  margin:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: CupertinoColors.systemGrey4,
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            CupertinoIcons.arrow_2_circlepath,
+                            size: 16,
+                            color: CupertinoColors.systemBlue,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Restoring history… $processed / $total messages',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                                color: CupertinoColors.label,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 6,
+                          backgroundColor: CupertinoColors.systemGrey5,
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            CupertinoColors.systemBlue,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${(progress * 100).toStringAsFixed(1)}%',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: CupertinoColors.systemGrey,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
           ),
           // Search bar
           SliverToBoxAdapter(
@@ -151,6 +236,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     final avatarLetter = data['avatarLetter'] as String? ??
                         (name.isNotEmpty ? name[0].toUpperCase() : '?');
                     final profileUrl = data['profileUrl'] as String?;
+                    final unreadCount = data['unreadCount'] as int? ?? 0;
 
                     return _ChatTile(
                       jid: jid,
@@ -159,6 +245,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       timestamp: timestamp,
                       avatarLetter: avatarLetter,
                       profileUrl: profileUrl,
+                      unreadCount: unreadCount,
                     );
                   },
                   childCount: docs.length,
@@ -235,6 +322,7 @@ class _ChatTile extends StatelessWidget {
   final Timestamp? timestamp;
   final String avatarLetter;
   final String? profileUrl;
+  final int unreadCount;
 
   const _ChatTile({
     required this.jid,
@@ -243,7 +331,51 @@ class _ChatTile extends StatelessWidget {
     required this.timestamp,
     required this.avatarLetter,
     this.profileUrl,
+    this.unreadCount = 0,
   });
+
+  void _showDeleteActionSheet(BuildContext context) {
+    showCupertinoModalPopup(
+      context: context,
+      builder: (BuildContext ctx) => CupertinoActionSheet(
+        title: const Text('Delete Chat?'),
+        message: Text('Are you sure you want to delete the chat with $name?'),
+        actions: <CupertinoActionSheetAction>[
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                // Delete from contacts
+                await FirebaseFirestore.instance.collection('contacts').doc(jid).delete();
+
+                // Delete associated messages in batch
+                final msgs = await FirebaseFirestore.instance
+                    .collection('messages')
+                    .where('chatId', isEqualTo: jid)
+                    .get();
+
+                if (msgs.docs.isNotEmpty) {
+                  final batch = FirebaseFirestore.instance.batch();
+                  for (var doc in msgs.docs) {
+                    batch.delete(doc.reference);
+                  }
+                  await batch.commit();
+                }
+              } catch (e) {
+                debugPrint('Error deleting chat: $e');
+              }
+            },
+            child: const Text('Delete Chat'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -257,10 +389,12 @@ class _ChatTile extends StatelessWidget {
               contactJid: jid,
               contactName: name,
               avatarLetter: avatarLetter,
+              profileUrl: profileUrl,
             ),
           ),
         );
       },
+      onLongPress: () => _showDeleteActionSheet(context),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         decoration: const BoxDecoration(
@@ -274,40 +408,20 @@ class _ChatTile extends StatelessWidget {
         child: Row(
           children: [
             // Avatar
-            Container(
+            SizedBox(
               width: 52,
               height: 52,
-              decoration: BoxDecoration(
-                gradient: (profileUrl == null || profileUrl!.isEmpty)
-                    ? LinearGradient(
-                        colors: [
-                          CupertinoColors.systemGrey.withValues(alpha: 0.4),
-                          CupertinoColors.systemGrey2.withValues(alpha: 0.6),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      )
-                    : null,
-                image: (profileUrl != null && profileUrl!.isNotEmpty)
-                    ? DecorationImage(
-                        image: NetworkImage(profileUrl!),
+              child: (profileUrl != null && profileUrl!.isNotEmpty)
+                  ? ClipOval(
+                      child: CachedNetworkImage(
+                        imageUrl: profileUrl!,
                         fit: BoxFit.cover,
-                      )
-                    : null,
-                shape: BoxShape.circle,
-              ),
-              child: (profileUrl == null || profileUrl!.isEmpty)
-                  ? Center(
-                      child: Text(
-                        avatarLetter,
-                        style: const TextStyle(
-                          color: CupertinoColors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w600,
-                        ),
+                        placeholder: (context, url) => _buildFallbackAvatar(),
+                        errorWidget: (context, url, error) =>
+                            _buildFallbackAvatar(),
                       ),
                     )
-                  : null,
+                  : _buildFallbackAvatar(),
             ),
             const SizedBox(width: 12),
             // Name + last message
@@ -339,15 +453,63 @@ class _ChatTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            // Timestamp
-            Text(
-              timeStr,
-              style: const TextStyle(
-                fontSize: 12.5,
-                color: CupertinoColors.systemGrey,
-              ),
+            // Timestamp + unread badge
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  timeStr,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    color: CupertinoColors.systemGrey,
+                  ),
+                ),
+                if (unreadCount > 0) ...[
+                  const SizedBox(height: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemGreen,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      unreadCount > 99 ? '99+' : '$unreadCount',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: CupertinoColors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildFallbackAvatar() {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            CupertinoColors.systemGrey.withValues(alpha: 0.4),
+            CupertinoColors.systemGrey2.withValues(alpha: 0.6),
           ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        shape: BoxShape.circle,
+      ),
+      child: Center(
+        child: Text(
+          avatarLetter,
+          style: const TextStyle(
+            color: CupertinoColors.white,
+            fontSize: 22,
+            fontWeight: FontWeight.w600,
+          ),
         ),
       ),
     );

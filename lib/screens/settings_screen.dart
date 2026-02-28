@@ -91,6 +91,47 @@ class SettingsScreen extends StatelessWidget {
     }
   }
 
+  Future<void> _refreshProfilePictures(BuildContext context) async {
+    try {
+      await FirebaseFirestore.instance.collection('commands').add({
+        'type': 'REFRESH_PROFILES',
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      
+      if (context.mounted) {
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Sync Started'),
+            content: const Text('The bridge is now fetching profile pictures for all your chats. This may take a minute.'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        showCupertinoDialog(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: const Text('Error'),
+            content: Text('Failed to start sync: $e'),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
@@ -229,6 +270,12 @@ class SettingsScreen extends StatelessWidget {
                       iconBgColor: CupertinoColors.systemIndigo,
                       title: 'Sync Phone Contacts',
                       onPressed: () => _syncContacts(context),
+                    ),
+                    _SettingsTile(
+                      icon: CupertinoIcons.refresh_circled_solid,
+                      iconBgColor: CupertinoColors.systemOrange,
+                      title: 'Refresh Profile Pictures',
+                      onPressed: () => _refreshProfilePictures(context),
                     ),
                   ],
                 ),

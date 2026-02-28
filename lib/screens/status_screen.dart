@@ -117,7 +117,7 @@ class _StatusRingStrip extends StatelessWidget {
       height: 110,
       child: StreamBuilder<QuerySnapshot>(
         stream: FirebaseFirestore.instance
-            .collection('outbox_stories')
+            .collection('stories')
             .where('timestamp',
                 isGreaterThan: Timestamp.fromDate(
                     DateTime.now().subtract(const Duration(hours: 24))))
@@ -185,6 +185,7 @@ class _StatusRingStrip extends StatelessWidget {
 
               final data = storyUsers[index - 1];
               final senderName = data['senderName'] as String? ?? 'Unknown';
+              final profileUrl = data['profileUrl'] as String?;
               final letter = senderName.isNotEmpty
                   ? senderName[0].toUpperCase()
                   : '?';
@@ -206,6 +207,7 @@ class _StatusRingStrip extends StatelessWidget {
                 child: _StatusRingAvatar(
                   name: senderName,
                   url: data['url'] as String?,
+                  profileUrl: profileUrl,
                   letter: letter,
                   isMyStatus: false,
                   seen: false, // Treat all as unseen (green ring)
@@ -222,6 +224,7 @@ class _StatusRingStrip extends StatelessWidget {
 class _StatusRingAvatar extends StatelessWidget {
   final String name;
   final String? url;
+  final String? profileUrl;
   final String letter;
   final bool isMyStatus;
   final bool seen;
@@ -229,6 +232,7 @@ class _StatusRingAvatar extends StatelessWidget {
   const _StatusRingAvatar({
     required this.name,
     this.url,
+    this.profileUrl,
     required this.letter,
     required this.isMyStatus,
     required this.seen,
@@ -273,13 +277,19 @@ class _StatusRingAvatar extends StatelessWidget {
                   child: Container(
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      image: url != null && url!.isNotEmpty
+                      image: (profileUrl != null && profileUrl!.isNotEmpty)
                           ? DecorationImage(
-                              image: NetworkImage(url!),
+                              image: NetworkImage(profileUrl!),
                               fit: BoxFit.cover,
                             )
-                          : null,
-                      gradient: url == null || url!.isEmpty
+                          : (url != null && url!.isNotEmpty)
+                              ? DecorationImage(
+                                  image: NetworkImage(url!),
+                                  fit: BoxFit.cover,
+                                )
+                              : null,
+                      gradient: ((profileUrl == null || profileUrl!.isEmpty) &&
+                              (url == null || url!.isEmpty))
                           ? LinearGradient(
                               colors: [
                                 CupertinoColors.systemGrey.withValues(alpha: 0.3),
@@ -288,7 +298,8 @@ class _StatusRingAvatar extends StatelessWidget {
                             )
                           : null,
                     ),
-                    child: (url == null || url!.isEmpty)
+                    child: ((profileUrl == null || profileUrl!.isEmpty) &&
+                            (url == null || url!.isEmpty))
                         ? Center(
                             child: Text(
                               letter,
@@ -351,7 +362,7 @@ class _RecentStories extends StatelessWidget {
   Widget build(BuildContext context) {
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance
-          .collection('outbox_stories')
+          .collection('stories')
           .where('timestamp',
               isGreaterThan: Timestamp.fromDate(
                   DateTime.now().subtract(const Duration(hours: 24))))
@@ -405,6 +416,7 @@ class _RecentStories extends StatelessWidget {
             final senderName = data['senderName'] as String? ?? 'Unknown';
             final caption = data['caption'] as String? ?? '';
             final type = data['type'] as String? ?? 'text';
+            final profileUrl = data['profileUrl'] as String?;
             final letter = senderName.isNotEmpty
                 ? senderName[0].toUpperCase()
                 : '?';
@@ -447,14 +459,35 @@ class _RecentStories extends StatelessWidget {
                         border:
                             Border.all(color: const Color(0xFF25D366), width: 2),
                       ),
-                      child: type == 'image' && data['url'] != null && data['url'].toString().isNotEmpty
+                      child: (profileUrl != null && profileUrl.isNotEmpty)
                           ? ClipOval(
                               child: Image.network(
-                                data['url'],
+                                profileUrl,
                                 fit: BoxFit.cover,
+                                loadingBuilder: (context, child, loadingProgress) {
+                                  if (loadingProgress == null) return child;
+                                  return Center(
+                                    child: Text(
+                                      letter,
+                                      style: const TextStyle(
+                                        color: CupertinoColors.white,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  );
+                                },
                                 errorBuilder: (context, error, stackTrace) =>
-                                    const Icon(CupertinoIcons.photo,
-                                        color: CupertinoColors.white, size: 20),
+                                    Center(
+                                      child: Text(
+                                        letter,
+                                        style: const TextStyle(
+                                          color: CupertinoColors.white,
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
                               ),
                             )
                           : Center(
