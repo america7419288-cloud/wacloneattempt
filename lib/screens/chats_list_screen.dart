@@ -237,6 +237,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                         (name.isNotEmpty ? name[0].toUpperCase() : '?');
                     final profileUrl = data['profileUrl'] as String?;
                     final unreadCount = data['unreadCount'] as int? ?? 0;
+                    final isGroup = data['isGroup'] == true;
 
                     return _ChatTile(
                       jid: jid,
@@ -246,6 +247,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       avatarLetter: avatarLetter,
                       profileUrl: profileUrl,
                       unreadCount: unreadCount,
+                      isGroup: isGroup,
                     );
                   },
                   childCount: docs.length,
@@ -323,6 +325,7 @@ class _ChatTile extends StatelessWidget {
   final String avatarLetter;
   final String? profileUrl;
   final int unreadCount;
+  final bool isGroup;
 
   const _ChatTile({
     required this.jid,
@@ -332,6 +335,7 @@ class _ChatTile extends StatelessWidget {
     required this.avatarLetter,
     this.profileUrl,
     this.unreadCount = 0,
+    this.isGroup = false,
   });
 
   void _showDeleteActionSheet(BuildContext context) {
@@ -411,17 +415,42 @@ class _ChatTile extends StatelessWidget {
             SizedBox(
               width: 52,
               height: 52,
-              child: (profileUrl != null && profileUrl!.isNotEmpty)
-                  ? ClipOval(
-                      child: CachedNetworkImage(
-                        imageUrl: profileUrl!,
-                        fit: BoxFit.cover,
-                        placeholder: (context, url) => _buildFallbackAvatar(),
-                        errorWidget: (context, url, error) =>
-                            _buildFallbackAvatar(),
+              child: Stack(
+                children: [
+                  (profileUrl != null && profileUrl!.isNotEmpty)
+                      ? ClipOval(
+                          child: CachedNetworkImage(
+                            imageUrl: profileUrl!,
+                            width: 52,
+                            height: 52,
+                            fit: BoxFit.cover,
+                            placeholder: (context, url) => _buildFallbackAvatar(),
+                            errorWidget: (context, url, error) =>
+                                _buildFallbackAvatar(),
+                          ),
+                        )
+                      : _buildFallbackAvatar(),
+                  if (isGroup)
+                    Positioned(
+                      bottom: 0,
+                      right: 0,
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGreen,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: CupertinoColors.white, width: 1.5),
+                        ),
+                        child: const Icon(
+                          CupertinoIcons.person_2_fill,
+                          size: 10,
+                          color: CupertinoColors.white,
+                        ),
                       ),
-                    )
-                  : _buildFallbackAvatar(),
+                    ),
+                ],
+              ),
             ),
             const SizedBox(width: 12),
             // Name + last message

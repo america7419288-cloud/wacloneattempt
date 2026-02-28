@@ -6,7 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:any_link_preview/any_link_preview.dart';
+import 'contact_info_screen.dart';
 
 const Color _incomingBubbleColor = Color(0xFFE5E5EA);
 const Color _outgoingBubbleColor = Color(0xFF34C759);
@@ -257,26 +257,35 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.contactName,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
+            GestureDetector(
+              onTap: () {
+                Navigator.of(context).push(
+                  CupertinoPageRoute(
+                    builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
                   ),
-                ),
-                const Text(
-                  'online',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: CupertinoColors.systemGrey,
-                    fontWeight: FontWeight.w400,
+                );
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.contactName,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-              ],
+                  const Text(
+                    'online',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: CupertinoColors.systemGrey,
+                      fontWeight: FontWeight.w400,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -440,7 +449,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             }
 
             final docId = docs[index].id;
-            double _swipeOffset = 0;
+            double swipeOffset = 0;
 
             return Column(
               children: [
@@ -450,17 +459,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     return GestureDetector(
                       onHorizontalDragUpdate: (details) {
                         setLocalState(() {
-                          _swipeOffset = (_swipeOffset + details.delta.dx).clamp(0.0, 80.0);
+                          swipeOffset = (swipeOffset + details.delta.dx).clamp(0.0, 80.0);
                         });
                       },
                       onHorizontalDragEnd: (_) {
-                        if (_swipeOffset > 60) _setReply(data);
-                        setLocalState(() => _swipeOffset = 0);
+                        if (swipeOffset > 60) _setReply(data);
+                        setLocalState(() => swipeOffset = 0);
                       },
                       onLongPress: () => _showLongPressMenu(context, data, docId),
                       onDoubleTap: () => _showReactionPicker(context, data),
                       child: Transform.translate(
-                        offset: Offset(_swipeOffset, 0),
+                        offset: Offset(swipeOffset, 0),
                         child: _ChatBubble(
                           data: data,
                           time: timeStr,
@@ -820,13 +829,83 @@ class _ChatBubble extends StatelessWidget {
           isOutgoing: isOutgoing,
         );
       default:
-        return Text(
-          data['text'] as String? ?? '',
-          style: TextStyle(
-            fontSize: 15.5,
-            color:
-                isOutgoing ? CupertinoColors.white : CupertinoColors.black,
-          ),
+        final text = data['text'] as String? ?? '';
+        final linkPreview = data['linkPreview'] as Map<String, dynamic>?;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              text,
+              style: TextStyle(
+                fontSize: 15.5,
+                color:
+                    isOutgoing ? CupertinoColors.white : CupertinoColors.black,
+              ),
+            ),
+            if (linkPreview != null) ...[
+              const SizedBox(height: 6),
+              GestureDetector(
+                onTap: () {
+                  final url = linkPreview['url'] as String? ?? '';
+                  if (url.isNotEmpty) {
+                    launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: isOutgoing
+                        ? CupertinoColors.white.withValues(alpha: 0.15)
+                        : CupertinoColors.systemGrey6,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if ((linkPreview['image'] as String? ?? '').isNotEmpty)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: CachedNetworkImage(
+                            imageUrl: linkPreview['image'],
+                            height: 100,
+                            width: double.infinity,
+                            fit: BoxFit.cover,
+                            errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                          ),
+                        ),
+                      if ((linkPreview['title'] as String? ?? '').isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          linkPreview['title'],
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: isOutgoing ? CupertinoColors.white : CupertinoColors.black,
+                          ),
+                        ),
+                      ],
+                      if ((linkPreview['description'] as String? ?? '').isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          linkPreview['description'],
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isOutgoing
+                                ? CupertinoColors.white.withValues(alpha: 0.7)
+                                : CupertinoColors.systemGrey,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
         );
     }
   }
@@ -968,31 +1047,42 @@ class _ImageContent extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: mediaUrl.isNotEmpty
-              ? CachedNetworkImage(
-                  imageUrl: mediaUrl,
-                  placeholder: (_, __) => const SizedBox(
-                    height: 150,
-                    child: Center(child: CupertinoActivityIndicator()),
-                  ),
-                  errorWidget: (_, __, ___) => const SizedBox(
+        GestureDetector(
+          onTap: () {
+            if (mediaUrl.isNotEmpty) {
+              Navigator.of(context).push(
+                CupertinoPageRoute(
+                  builder: (_) => _MediaViewerPage(imageUrl: mediaUrl),
+                ),
+              );
+            }
+          },
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: mediaUrl.isNotEmpty
+                ? CachedNetworkImage(
+                    imageUrl: mediaUrl,
+                    placeholder: (_, __) => const SizedBox(
+                      height: 150,
+                      child: Center(child: CupertinoActivityIndicator()),
+                    ),
+                    errorWidget: (_, __, ___) => const SizedBox(
+                      height: 150,
+                      child: Center(
+                        child: Icon(CupertinoIcons.photo,
+                            size: 40, color: CupertinoColors.systemGrey),
+                      ),
+                    ),
+                    fit: BoxFit.cover,
+                  )
+                : const SizedBox(
                     height: 150,
                     child: Center(
                       child: Icon(CupertinoIcons.photo,
                           size: 40, color: CupertinoColors.systemGrey),
                     ),
                   ),
-                  fit: BoxFit.cover,
-                )
-              : const SizedBox(
-                  height: 150,
-                  child: Center(
-                    child: Icon(CupertinoIcons.photo,
-                        size: 40, color: CupertinoColors.systemGrey),
-                  ),
-                ),
+          ),
         ),
         if (caption.isNotEmpty) ...[
           const SizedBox(height: 6),
@@ -1171,6 +1261,130 @@ class _FileContent extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// --- PROFILE VIEWER ---
+class _ProfileViewerPage extends StatelessWidget {
+  final String imageUrl;
+  final String name;
+
+  const _ProfileViewerPage({required this.imageUrl, required this.name});
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(
+        middle: Text(name),
+        backgroundColor: CupertinoColors.black,
+      ),
+      child: Container(
+        color: CupertinoColors.black,
+        child: PhotoView(
+          imageProvider: CachedNetworkImageProvider(imageUrl),
+          minScale: PhotoViewComputedScale.contained,
+          maxScale: PhotoViewComputedScale.covered * 3,
+        ),
+      ),
+    );
+  }
+}
+
+// --- FULL SCREEN IMAGE VIEWER ---
+class _MediaViewerPage extends StatelessWidget {
+  final String imageUrl;
+
+  const _MediaViewerPage({required this.imageUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoPageScaffold(
+      navigationBar: const CupertinoNavigationBar(
+        backgroundColor: CupertinoColors.black,
+      ),
+      child: Container(
+        color: CupertinoColors.black,
+        child: PhotoView(
+          imageProvider: CachedNetworkImageProvider(imageUrl),
+          minScale: PhotoViewComputedScale.contained,
+          maxScale: PhotoViewComputedScale.covered * 3,
+        ),
+      ),
+    );
+  }
+}
+
+// --- VIDEO PLAYER PAGE ---
+class _VideoPlayerPage extends StatefulWidget {
+  final String videoUrl;
+
+  const _VideoPlayerPage({required this.videoUrl});
+
+  @override
+  State<_VideoPlayerPage> createState() => _VideoPlayerPageState();
+}
+
+class _VideoPlayerPageState extends State<_VideoPlayerPage> {
+  late VideoPlayerController _controller;
+  bool _initialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.videoUrl))
+      ..initialize().then((_) {
+        setState(() => _initialized = true);
+        _controller.play();
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoPageScaffold(
+      navigationBar: const CupertinoNavigationBar(
+        backgroundColor: CupertinoColors.black,
+      ),
+      child: Container(
+        color: CupertinoColors.black,
+        child: Center(
+          child: _initialized
+              ? AspectRatio(
+                  aspectRatio: _controller.value.aspectRatio,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      VideoPlayer(_controller),
+                      GestureDetector(
+                        onTap: () {
+                          setState(() {
+                            _controller.value.isPlaying
+                                ? _controller.pause()
+                                : _controller.play();
+                          });
+                        },
+                        child: AnimatedOpacity(
+                          opacity: _controller.value.isPlaying ? 0.0 : 1.0,
+                          duration: const Duration(milliseconds: 200),
+                          child: const Icon(
+                            CupertinoIcons.play_circle_fill,
+                            size: 64,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : const CupertinoActivityIndicator(),
+        ),
       ),
     );
   }
