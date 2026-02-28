@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'screens/home_screen.dart';
+import 'theme_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,16 +14,16 @@ class WACApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const CupertinoApp(
-      title: 'WhatsApp',
-      debugShowCheckedModeBanner: false,
-      theme: CupertinoThemeData(
-        brightness: Brightness.light,
-        primaryColor: CupertinoColors.systemBlue,
-        scaffoldBackgroundColor: CupertinoColors.systemGroupedBackground,
-        barBackgroundColor: CupertinoColors.systemBackground,
-      ),
-      home: HomeScreen(),
+    return ValueListenableBuilder<bool>(
+      valueListenable: darkModeNotifier,
+      builder: (context, isDark, _) {
+        return CupertinoApp(
+          title: 'WhatsApp',
+          debugShowCheckedModeBanner: false,
+          theme: isDark ? darkTheme : lightTheme,
+          home: const HomeScreen(),
+        );
+      },
     );
   }
 }

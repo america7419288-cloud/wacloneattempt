@@ -8,8 +8,14 @@ import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'contact_info_screen.dart';
 
-const Color _incomingBubbleColor = Color(0xFFE5E5EA);
-const Color _outgoingBubbleColor = Color(0xFF34C759);
+const _incomingBubbleColor = CupertinoDynamicColor.withBrightness(
+  color: Color(0xFFE5E5EA),
+  darkColor: Color(0xFF1C1C1E),
+);
+const _outgoingBubbleColor = CupertinoDynamicColor.withBrightness(
+  color: Color(0xFF34C759),
+  darkColor: Color(0xFF174F2A),
+);
 
 class ChatDetailScreen extends StatefulWidget {
   final String contactJid;
@@ -563,7 +569,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         return ListView.builder(
           controller: _scrollController,
           reverse: true,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
           itemCount: docs.length,
           itemBuilder: (context, index) {
             final data = docs[index].data() as Map<String, dynamic>;
@@ -1036,7 +1042,7 @@ class _ChatBubble extends StatelessWidget {
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                 decoration: BoxDecoration(
-                  color: isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor,
+                  color: CupertinoDynamicColor.resolve(isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor, context),
                   borderRadius: BorderRadius.only(
                     topLeft: const Radius.circular(16),
                     topRight: const Radius.circular(16),

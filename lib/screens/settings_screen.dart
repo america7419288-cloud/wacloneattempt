@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../theme_provider.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -217,6 +218,44 @@ class SettingsScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 24),
+                // Dark mode toggle
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.secondarySystemGroupedBackground.resolveFrom(context),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: darkModeNotifier,
+                    builder: (context, isDark, _) {
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 30,
+                              height: 30,
+                              decoration: BoxDecoration(
+                                color: CupertinoColors.systemIndigo,
+                                borderRadius: BorderRadius.circular(7),
+                              ),
+                              child: const Icon(CupertinoIcons.moon_fill, color: CupertinoColors.white, size: 18),
+                            ),
+                            const SizedBox(width: 12),
+                            const Expanded(
+                              child: Text('Dark Mode', style: TextStyle(fontSize: 16)),
+                            ),
+                            CupertinoSwitch(
+                              value: isDark,
+                              activeTrackColor: CupertinoColors.systemGreen,
+                              onChanged: (val) => darkModeNotifier.value = val,
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
                 // Settings sections
                 _SettingsSection(
                   children: [

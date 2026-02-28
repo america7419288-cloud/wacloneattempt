@@ -53,12 +53,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                 final data =
                     snapshot.data!.data() as Map<String, dynamic>? ?? {};
                 final isSyncing = data['isSyncing'] as bool? ?? false;
-                if (!isSyncing) return const SizedBox.shrink();
-
-                final total = (data['totalMessages'] as num?)?.toInt() ?? 1;
-                final processed =
-                    (data['processedMessages'] as num?)?.toInt() ?? 0;
-                final progress = total > 0 ? processed / total : 0.0;
+                final total = (data['totalMessages'] as num?)?.toInt() ?? 0;
+                final processed = (data['processedMessages'] as num?)?.toInt() ?? 0;
+                if (!isSyncing || total <= 0 || processed >= total) return const SizedBox.shrink();
+                final progress = processed / total;
 
                 return Container(
                   margin:
