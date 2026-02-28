@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show LinearProgressIndicator, AlwaysStoppedAnimation;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -254,6 +255,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                     final profileUrl = data['profileUrl'] as String?;
                     final unreadCount = data['unreadCount'] as int? ?? 0;
                     final isGroup = data['isGroup'] == true;
+                    final isPinned = data['isPinned'] == true;
 
                     return _ChatTile(
                       jid: jid,
@@ -264,6 +266,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                       profileUrl: profileUrl,
                       unreadCount: unreadCount,
                       isGroup: isGroup,
+                      isPinned: isPinned,
                     );
                   },
                   childCount: docs.length,
@@ -293,23 +296,39 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
   }
 }
 
-class _ComposeButton extends StatelessWidget {
+class _ComposeButton extends StatefulWidget {
   const _ComposeButton();
+  @override
+  State<_ComposeButton> createState() => _ComposeButtonState();
+}
+
+class _ComposeButtonState extends State<_ComposeButton> {
+  double _scale = 1.0;
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoButton(
-      padding: EdgeInsets.zero,
-      onPressed: () {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _scale = 0.88),
+      onTapUp: (_) {
+        setState(() => _scale = 1.0);
+        HapticFeedback.selectionClick();
         Navigator.of(context).push(
-          CupertinoPageRoute(
-            builder: (_) => const ContactPickerScreen(),
-          ),
+          CupertinoPageRoute(builder: (_) => const ContactPickerScreen()),
         );
       },
-      child: const Icon(
-        CupertinoIcons.square_pencil,
-        color: CupertinoColors.systemBlue,
+      onTapCancel: () => setState(() => _scale = 1.0),
+      child: AnimatedScale(
+        scale: _scale,
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        child: const Padding(
+          padding: EdgeInsets.all(8),
+          child: Icon(
+            CupertinoIcons.square_pencil,
+            color: CupertinoColors.systemBlue,
+            size: 24,
+          ),
+        ),
       ),
     );
   }
@@ -333,7 +352,7 @@ String _formatTimestamp(Timestamp? timestamp) {
   }
 }
 
-class _ChatTile extends StatelessWidget {
+class _ChatTile extends StatefulWidget {
   final String jid;
   final String name;
   final String lastMessage;
@@ -342,6 +361,7 @@ class _ChatTile extends StatelessWidget {
   final String? profileUrl;
   final int unreadCount;
   final bool isGroup;
+  final bool isPinned;
 
   const _ChatTile({
     required this.jid,
@@ -352,183 +372,211 @@ class _ChatTile extends StatelessWidget {
     this.profileUrl,
     this.unreadCount = 0,
     this.isGroup = false,
+    this.isPinned = false,
   });
 
-  void _showDeleteActionSheet(BuildContext context) {
-    showCupertinoModalPopup(
-      context: context,
-      builder: (BuildContext ctx) => CupertinoActionSheet(
-        title: const Text('Delete Chat?'),
-        message: Text('Are you sure you want to delete the chat with $name?'),
-        actions: <CupertinoActionSheetAction>[
-          CupertinoActionSheetAction(
-            isDestructiveAction: true,
-            onPressed: () async {
-              Navigator.pop(ctx);
-              try {
-                // Delete from contacts
-                await FirebaseFirestore.instance.collection('contacts').doc(jid).delete();
+  @override
+  State<_ChatTile> createState() => _ChatTileState();
+}
 
-                // Delete associated messages in batch
-                final msgs = await FirebaseFirestore.instance
-                    .collection('messages')
-                    .where('chatId', isEqualTo: jid)
-                    .get();
-
-                if (msgs.docs.isNotEmpty) {
-                  final batch = FirebaseFirestore.instance.batch();
-                  for (var doc in msgs.docs) {
-                    batch.delete(doc.reference);
-                  }
-                  await batch.commit();
-                }
-              } catch (e) {
-                debugPrint('Error deleting chat: $e');
-              }
-            },
-            child: const Text('Delete Chat'),
-          ),
-        ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
-      ),
-    );
-  }
+class _ChatTileState extends State<_ChatTile> {
+  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
-    final timeStr = _formatTimestamp(timestamp);
+    final timeStr = _formatTimestamp(widget.timestamp);
 
-    return GestureDetector(
-      onTap: () {
-        Navigator.of(context).push(
-          CupertinoPageRoute(
-            builder: (_) => ChatDetailScreen(
-              contactJid: jid,
-              contactName: name,
-              avatarLetter: avatarLetter,
-              profileUrl: profileUrl,
-            ),
+    return Dismissible(
+      key: ValueKey(widget.jid),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        color: CupertinoColors.systemRed,
+        child: const Icon(CupertinoIcons.delete, color: CupertinoColors.white, size: 24),
+      ),
+      confirmDismiss: (direction) async {
+        HapticFeedback.mediumImpact();
+        bool confirm = false;
+        await showCupertinoDialog(
+          context: context,
+          builder: (ctx) => CupertinoAlertDialog(
+            title: const Text('Delete Chat?'),
+            content: Text('Delete chat with ${widget.name}?'),
+            actions: [
+              CupertinoDialogAction(
+                isDestructiveAction: true,
+                onPressed: () {
+                  HapticFeedback.heavyImpact();
+                  confirm = true;
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Delete'),
+              ),
+              CupertinoDialogAction(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+            ],
           ),
         );
+        return confirm;
       },
-      onLongPress: () => _showDeleteActionSheet(context),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: const BoxDecoration(
-          border: Border(
-            bottom: BorderSide(
-              color: CupertinoColors.separator,
-              width: 0.5,
-            ),
-          ),
-        ),
-        child: Row(
-          children: [
-            // Avatar
-            SizedBox(
-              width: 52,
-              height: 52,
-              child: Stack(
-                children: [
-                  (profileUrl != null && profileUrl!.isNotEmpty)
-                      ? ClipOval(
-                          child: CachedNetworkImage(
-                            imageUrl: profileUrl!,
-                            width: 52,
-                            height: 52,
-                            fit: BoxFit.cover,
-                            placeholder: (context, url) => _buildFallbackAvatar(),
-                            errorWidget: (context, url, error) =>
-                                _buildFallbackAvatar(),
-                          ),
-                        )
-                      : _buildFallbackAvatar(),
-                  if (isGroup)
-                    Positioned(
-                      bottom: 0,
-                      right: 0,
-                      child: Container(
-                        width: 18,
-                        height: 18,
-                        decoration: BoxDecoration(
-                          color: CupertinoColors.systemGreen,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: CupertinoColors.white, width: 1.5),
-                        ),
-                        child: const Icon(
-                          CupertinoIcons.person_2_fill,
-                          size: 10,
-                          color: CupertinoColors.white,
-                        ),
-                      ),
-                    ),
-                ],
+      onDismissed: (_) async {
+        HapticFeedback.heavyImpact();
+        await FirebaseFirestore.instance.collection('contacts').doc(widget.jid).delete();
+        final msgs = await FirebaseFirestore.instance.collection('messages').where('chatId', isEqualTo: widget.jid).get();
+        if (msgs.docs.isNotEmpty) {
+          final batch = FirebaseFirestore.instance.batch();
+          for (var doc in msgs.docs) batch.delete(doc.reference);
+          await batch.commit();
+        }
+      },
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _pressed = true),
+        onTapUp: (_) {
+          setState(() => _pressed = false);
+          Navigator.of(context).push(
+            CupertinoPageRoute(
+              builder: (_) => ChatDetailScreen(
+                contactJid: widget.jid,
+                contactName: widget.name,
+                avatarLetter: widget.avatarLetter,
+                profileUrl: widget.profileUrl,
               ),
             ),
-            const SizedBox(width: 12),
-            // Name + last message
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+          );
+        },
+        onTapCancel: () => setState(() => _pressed = false),
+        onLongPress: () {
+          HapticFeedback.mediumImpact();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          color: _pressed
+              ? CupertinoColors.systemGrey5.resolveFrom(context)
+              : CupertinoColors.systemBackground.resolveFrom(context),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            children: [
+              // Avatar
+              SizedBox(
+                width: 52,
+                height: 52,
+                child: Stack(
+                  children: [
+                    (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
+                        ? ClipOval(
+                            child: CachedNetworkImage(
+                              imageUrl: widget.profileUrl!,
+                              width: 52,
+                              height: 52,
+                              fit: BoxFit.cover,
+                              placeholder: (context, url) => _buildFallbackAvatar(),
+                              errorWidget: (context, url, error) => _buildFallbackAvatar(),
+                            ),
+                          )
+                        : _buildFallbackAvatar(),
+                    if (widget.isGroup)
+                      Positioned(
+                        bottom: 0,
+                        right: 0,
+                        child: Container(
+                          width: 18,
+                          height: 18,
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemGreen,
+                            shape: BoxShape.circle,
+                            border: Border.all(color: CupertinoColors.white, width: 1.5),
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.person_2_fill,
+                            size: 10,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Name + last message
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.name,
+                      style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      _formatLastMessage(widget.lastMessage),
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: CupertinoColors.systemGrey,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Timestamp + unread badge
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   Text(
-                    name,
+                    timeStr,
                     style: const TextStyle(
-                      fontSize: 16.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    lastMessage,
-                    style: const TextStyle(
-                      fontSize: 14,
+                      fontSize: 12.5,
                       color: CupertinoColors.systemGrey,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            // Timestamp + unread badge
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  timeStr,
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    color: CupertinoColors.systemGrey,
-                  ),
-                ),
-                if (unreadCount > 0) ...[
-                  const SizedBox(height: 4),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: CupertinoColors.systemGreen,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      unreadCount > 99 ? '99+' : '$unreadCount',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: CupertinoColors.white,
+                  if (widget.unreadCount > 0) ...[
+                    const SizedBox(height: 4),
+                    TweenAnimationBuilder<double>(
+                      key: ValueKey(widget.unreadCount),
+                      tween: Tween(begin: 1.3, end: 1.0),
+                      duration: const Duration(milliseconds: 400),
+                      curve: Curves.elasticOut,
+                      builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemGreen,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                  ],
+                  if (widget.isPinned) ...[
+                    const SizedBox(height: 4),
+                    const Icon(
+                      CupertinoIcons.pin_fill,
+                      size: 12,
+                      color: CupertinoColors.systemGrey,
+                    ),
+                  ],
                 ],
-              ],
-            ),
-        ]),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -548,7 +596,7 @@ class _ChatTile extends StatelessWidget {
       ),
       child: Center(
         child: Text(
-          avatarLetter,
+          widget.avatarLetter,
           style: const TextStyle(
             color: CupertinoColors.white,
             fontSize: 22,
@@ -557,5 +605,24 @@ class _ChatTile extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  static String _formatLastMessage(String msg) {
+    if (msg.startsWith('[') && msg.endsWith(']')) {
+      final type = msg.substring(1, msg.length - 1).toLowerCase();
+      switch (type) {
+        case 'image':
+          return '📷 Photo';
+        case 'video':
+          return '🎬 Video';
+        case 'audio':
+          return '🎤 Voice message';
+        case 'file':
+          return '📄 Document';
+        default:
+          return msg;
+      }
+    }
+    return msg;
   }
 }

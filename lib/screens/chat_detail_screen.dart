@@ -34,6 +34,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final ScrollController _scrollController = ScrollController();
   Map<String, dynamic>? _replyingTo;
   bool _showScrollToBottom = false;
+  bool _hasText = false;
 
   @override
   void initState() {
@@ -47,6 +48,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       if (show != _showScrollToBottom) {
         setState(() => _showScrollToBottom = show);
       }
+    });
+    _textController.addListener(() {
+      final has = _textController.text.trim().isNotEmpty;
+      if (has != _hasText) setState(() => _hasText = has);
     });
   }
 
@@ -95,6 +100,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     setState(() => _replyingTo = data);
   }
 
+  Color _senderColor(String name) {
+    const colors = [
+      Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF3F51B5),
+      Color(0xFF2196F3), Color(0xFF009688), Color(0xFF4CAF50),
+      Color(0xFFFF5722), Color(0xFF795548),
+    ];
+    return colors[name.hashCode.abs() % colors.length];
+  }
+
   void _showLongPressMenu(BuildContext ctx, Map<String, dynamic> data, String docId) {
     showCupertinoModalPopup(
       context: ctx,
@@ -132,30 +146,62 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     const emojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
     showCupertinoModalPopup(
       context: ctx,
-      builder: (_) => Container(
-        padding: const EdgeInsets.all(12),
-        decoration: const BoxDecoration(
-          color: CupertinoColors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      builder: (_) => TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.elasticOut,
+        builder: (context, value, child) => Transform.scale(
+          scale: value,
+          alignment: Alignment.bottomCenter,
+          child: child,
         ),
-        child: SafeArea(
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: emojis.map((emoji) {
-              return GestureDetector(
-                onTap: () {
-                  Navigator.pop(ctx);
-                  FirebaseFirestore.instance.collection('outbox_reactions').add({
-                    'chatJid': widget.contactJid,
-                    'msgKeyId': data['msgKeyId'] ?? '',
-                    'emoji': emoji,
-                    'fromMe': data['isMe'] ?? false,
-                    'status': 'pending',
-                  });
-                },
-                child: Text(emoji, style: const TextStyle(fontSize: 32)),
-              );
-            }).toList(),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(12, 16, 12, 8),
+          decoration: BoxDecoration(
+            color: CupertinoColors.systemBackground.resolveFrom(ctx),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            boxShadow: [BoxShadow(color: CupertinoColors.black.withValues(alpha: 0.15), blurRadius: 20)],
+          ),
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 36, height: 4,
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemGrey4,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: emojis.map((emoji) {
+                    return GestureDetector(
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        Navigator.pop(ctx);
+                        FirebaseFirestore.instance.collection('outbox_reactions').add({
+                          'chatJid': widget.contactJid,
+                          'msgKeyId': data['msgKeyId'] ?? '',
+                          'emoji': emoji,
+                          'fromMe': data['isMe'] ?? false,
+                          'status': 'pending',
+                        });
+                      },
+                      child: TweenAnimationBuilder<double>(
+                        tween: Tween(begin: 0.5, end: 1.0),
+                        duration: Duration(milliseconds: 300 + emojis.indexOf(emoji) * 50),
+                        curve: Curves.elasticOut,
+                        builder: (_, v, child) => Transform.scale(scale: v, child: child),
+                        child: Text(emoji, style: const TextStyle(fontSize: 36)),
+                      ),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 8),
+              ],
+            ),
           ),
         ),
       ),
@@ -249,6 +295,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
+        backgroundColor: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.8),
+        border: Border(bottom: BorderSide(color: CupertinoColors.separator.resolveFrom(context), width: 0.33)),
         transitionBetweenRoutes: false,
         middle: Row(
           mainAxisSize: MainAxisSize.min,
@@ -343,14 +391,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           ],
         ),
       ),
-      child: SafeArea(
-        child: Column(
-          children: [
-            // Messages area
-            Expanded(
-              child: Stack(
-                children: [
-                  _buildMessageList(),
+      child: Stack(
+        children: [
+          // 1A: Dot pattern background
+          Positioned.fill(
+            child: Container(
+              color: CupertinoDynamicColor.resolve(
+                const CupertinoDynamicColor.withBrightness(
+                  color: Color(0xFFEFEBE0),
+                  darkColor: Color(0xFF0D1117),
+                ),
+                context,
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: CustomPaint(painter: _ChatBackgroundPainter()),
+          ),
+          SafeArea(
+            child: Column(
+              children: [
+                // Messages area
+                Expanded(
+                  child: Stack(
+                    children: [
+                      _buildMessageList(),
                   if (_showScrollToBottom)
                     Positioned(
                       bottom: 8,
@@ -389,10 +454,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 ],
               ),
             ),
-            // Input bar (with admin restriction)
-            _buildRestrictedInputBar(),
-          ],
+            // Input bar (with admin restriction + typing indicator)
+              _buildTypingIndicator(),
+              _buildRestrictedInputBar(),
+            ],
+          ),
         ),
+        ],
       ),
     );
   }
@@ -501,9 +569,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             final data = docs[index].data() as Map<String, dynamic>;
             final isOutgoing = data['isMe'] == true;
             final timestamp = data['timestamp'] as Timestamp?;
-            final timeStr = timestamp != null
-                ? '${timestamp.toDate().hour.toString().padLeft(2, '0')}:${timestamp.toDate().minute.toString().padLeft(2, '0')}'
-                : '';
+            // Fix 6: Relative time display
+            String timeStr = '';
+            if (timestamp != null) {
+              final dt = timestamp.toDate();
+              final now = DateTime.now();
+              final hhmm = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+              if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+                timeStr = hhmm;
+              } else if (dt.year == now.year && dt.month == now.month && dt.day == now.day - 1) {
+                timeStr = 'Yesterday $hhmm';
+              } else if (now.difference(dt).inDays < 7) {
+                const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                timeStr = '${days[dt.weekday - 1]} $hhmm';
+              } else {
+                timeStr = '${dt.day}/${dt.month} $hhmm';
+              }
+            }
 
             // --- DATE HEADER LOGIC ---
             Widget? dateHeader;
@@ -524,28 +606,93 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             }
 
             final docId = docs[index].id;
+            final isGroup = widget.contactJid.endsWith('@g.us');
+            final senderName = data['senderName'] as String? ?? '';
+            final isNewest = index == 0;
 
-            return Column(
-              children: [
-                if (dateHeader != null) dateHeader,
-                _SwipableBubbleRow(
-                  data: data,
-                  time: timeStr,
-                  isOutgoing: isOutgoing,
-                  docId: docId,
-                  onReply: _setReply,
-                  onLongPress: () {
-                    if (data['deleted'] == true) return;
-                    _showLongPressMenu(context, data, docId);
-                  },
-                  onDoubleTap: () {
-                    if (data['deleted'] == true) return;
-                    _showReactionPicker(context, data);
-                  },
+            return AnimatedSlide(
+              key: ValueKey(docId),
+              offset: isNewest ? Offset(isOutgoing ? 0.08 : -0.08, 0) : Offset.zero,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutCubic,
+              child: AnimatedOpacity(
+                opacity: 1.0,
+                duration: const Duration(milliseconds: 200),
+                child: Column(
+                  children: [
+                    if (dateHeader != null) dateHeader,
+                    // Group sender name above incoming bubble
+                    if (!isOutgoing && isGroup && senderName.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 14, bottom: 2),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            senderName,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: _senderColor(senderName),
+                            ),
+                          ),
+                        ),
+                      ),
+                    _SwipableBubbleRow(
+                      data: data,
+                      time: timeStr,
+                      isOutgoing: isOutgoing,
+                      docId: docId,
+                      onReply: _setReply,
+                      onLongPress: () {
+                        if (data['deleted'] == true) return;
+                        HapticFeedback.mediumImpact();
+                        _showLongPressMenu(context, data, docId);
+                      },
+                      onDoubleTap: () {
+                        if (data['deleted'] == true) return;
+                        HapticFeedback.selectionClick();
+                        _showReactionPicker(context, data);
+                      },
+                    ),
+                  ],
                 ),
-              ],
+              ),
             );
           },
+        );
+      },
+    );
+  }
+
+  // Fix 8: Typing indicator
+  Widget _buildTypingIndicator() {
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('contacts')
+          .doc(widget.contactJid)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) return const SizedBox.shrink();
+        final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+        final presence = data['presence'] as String? ?? '';
+        if (presence != 'composing') return const SizedBox.shrink();
+        return Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            margin: const EdgeInsets.only(left: 12, bottom: 4, top: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: CupertinoDynamicColor.resolve(
+                const CupertinoDynamicColor.withBrightness(
+                  color: Color(0xFFE5E5EA),
+                  darkColor: Color(0xFF2C2C2E),
+                ),
+                context,
+              ),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: const _TypingIndicator(),
+          ),
         );
       },
     );
@@ -591,22 +738,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Reply preview bar
-        if (_replyingTo != null)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: CupertinoColors.systemGrey6.resolveFrom(context),
-              border: const Border(
-                top: BorderSide(color: CupertinoColors.separator, width: 0.5),
-              ),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 3,
-                  height: 36,
-                  decoration: BoxDecoration(
+        // 1F: Animated reply banner
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          child: _replyingTo != null
+            ? Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.systemGrey6.resolveFrom(context),
+                  border: const Border(
+                    top: BorderSide(color: CupertinoColors.separator, width: 0.5),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 3,
+                      height: 36,
+                      decoration: BoxDecoration(
                     color: CupertinoColors.systemBlue,
                     borderRadius: BorderRadius.circular(2),
                   ),
@@ -629,14 +779,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     ],
                   ),
                 ),
-                CupertinoButton(
-                  padding: EdgeInsets.zero,
-                  child: const Icon(CupertinoIcons.xmark_circle_fill, size: 20, color: CupertinoColors.systemGrey),
-                  onPressed: () => setState(() => _replyingTo = null),
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      child: const Icon(CupertinoIcons.xmark_circle_fill, size: 20, color: CupertinoColors.systemGrey),
+                      onPressed: () => setState(() => _replyingTo = null),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+              )
+            : const SizedBox.shrink(),
+        ),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
@@ -647,15 +799,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           ),
           child: Row(
             children: [
-              // Camera icon -> media picker
+              // Attachment icon -> action sheet (Fix 7)
               CupertinoButton(
                 padding: const EdgeInsets.all(4),
                 child: const Icon(
-                  CupertinoIcons.camera_fill,
+                  CupertinoIcons.paperclip,
                   color: CupertinoColors.systemGrey,
                   size: 24,
                 ),
                 onPressed: _pickAndSendMedia,
+              ),
+              // Emoji button (Fix 4)
+              CupertinoButton(
+                padding: const EdgeInsets.all(4),
+                child: const Icon(
+                  CupertinoIcons.smiley,
+                  color: CupertinoColors.systemGrey,
+                  size: 24,
+                ),
+                onPressed: () {},
               ),
               // Text field
               Expanded(
@@ -677,23 +839,52 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 ),
               ),
               const SizedBox(width: 4),
-              // Send button
-              CupertinoButton(
-                padding: const EdgeInsets.all(4),
-                onPressed: _sendMessage,
-                child: Container(
-                  width: 34,
-                  height: 34,
-                  decoration: const BoxDecoration(
-                    color: CupertinoColors.systemBlue,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(
-                    CupertinoIcons.arrow_up,
-                    color: CupertinoColors.white,
-                    size: 20,
-                  ),
-                ),
+              // Dynamic send/mic button with elastic spring (1E)
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 220),
+                transitionBuilder: (child, anim) {
+                  return ScaleTransition(
+                    scale: CurvedAnimation(parent: anim, curve: Curves.elasticOut),
+                    child: FadeTransition(opacity: anim, child: child),
+                  );
+                },
+                child: _hasText
+                    ? CupertinoButton(
+                        key: const ValueKey('send'),
+                        padding: const EdgeInsets.all(4),
+                        onPressed: _sendMessage,
+                        child: Container(
+                          width: 34,
+                          height: 34,
+                          decoration: const BoxDecoration(
+                            color: CupertinoColors.systemBlue,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.arrow_up,
+                            color: CupertinoColors.white,
+                            size: 20,
+                          ),
+                        ),
+                      )
+                    : CupertinoButton(
+                        key: const ValueKey('mic'),
+                        padding: const EdgeInsets.all(4),
+                        onPressed: () {},
+                        child: Container(
+                          width: 34,
+                          height: 34,
+                          decoration: const BoxDecoration(
+                            color: CupertinoColors.systemBlue,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            CupertinoIcons.mic,
+                            color: CupertinoColors.white,
+                            size: 20,
+                          ),
+                        ),
+                      ),
               ),
             ],
           ),
@@ -730,10 +921,14 @@ class _SwipableBubbleRow extends StatefulWidget {
 class _SwipableBubbleRowState extends State<_SwipableBubbleRow> {
   double swipeOffset = 0;
   bool didTriggerHaptic = false;
+  double _scale = 1.0;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
+      onTapDown: (_) => setState(() => _scale = 0.97),
+      onTapUp: (_) => setState(() => _scale = 1.0),
+      onTapCancel: () => setState(() => _scale = 1.0),
       onHorizontalDragUpdate: (details) {
         final delta = widget.isOutgoing ? -details.delta.dx : details.delta.dx;
         if (delta > 0 || swipeOffset > 0) {
@@ -764,33 +959,44 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow> {
           });
         }
       },
-      onLongPress: widget.onLongPress,
-      onDoubleTap: widget.onDoubleTap,
-      child: SizedBox(
-        width: double.infinity,
-        child: Stack(
-          alignment: widget.isOutgoing ? Alignment.centerLeft : Alignment.centerRight,
-          children: [
-            if (swipeOffset > 10)
-              Opacity(
-                opacity: (swipeOffset / 60).clamp(0.0, 1.0),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 16),
-                  child: Icon(CupertinoIcons.reply, color: CupertinoColors.systemGrey, size: 22),
+      onLongPress: () {
+        HapticFeedback.mediumImpact();
+        widget.onLongPress();
+      },
+      onDoubleTap: () {
+        HapticFeedback.selectionClick();
+        widget.onDoubleTap();
+      },
+      child: AnimatedScale(
+        scale: _scale,
+        duration: const Duration(milliseconds: 80),
+        curve: Curves.easeOut,
+        child: SizedBox(
+          width: double.infinity,
+          child: Stack(
+            alignment: widget.isOutgoing ? Alignment.centerLeft : Alignment.centerRight,
+            children: [
+              if (swipeOffset > 10)
+                Opacity(
+                  opacity: (swipeOffset / 60).clamp(0.0, 1.0),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 16),
+                    child: Icon(CupertinoIcons.reply, color: CupertinoColors.systemGrey, size: 22),
+                  ),
+                ),
+              Align(
+                alignment: widget.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+                child: Transform.translate(
+                  offset: Offset(widget.isOutgoing ? -swipeOffset : swipeOffset, 0),
+                  child: _ChatBubble(
+                    data: widget.data,
+                    time: widget.time,
+                    isOutgoing: widget.isOutgoing,
+                  ),
                 ),
               ),
-            Align(
-              alignment: widget.isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-              child: Transform.translate(
-                offset: Offset(widget.isOutgoing ? -swipeOffset : swipeOffset, 0),
-                child: _ChatBubble(
-                  data: widget.data,
-                  time: widget.time,
-                  isOutgoing: widget.isOutgoing,
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1198,8 +1404,19 @@ class _DateChip extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 5),
           decoration: BoxDecoration(
-            color: CupertinoColors.systemGrey5,
-            borderRadius: BorderRadius.circular(12),
+            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: CupertinoColors.separator.resolveFrom(context),
+              width: 0.33,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: CupertinoColors.black.withValues(alpha: 0.06),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
           child: Text(
             _formatDate(date),
@@ -1314,31 +1531,53 @@ class _ImageContent extends StatelessWidget {
               );
             }
           },
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: mediaUrl.isNotEmpty
-                ? CachedNetworkImage(
-                    imageUrl: mediaUrl,
-                    placeholder: (_, __) => const SizedBox(
-                      height: 150,
-                      child: Center(child: CupertinoActivityIndicator()),
-                    ),
-                    errorWidget: (_, __, ___) => const SizedBox(
-                      height: 150,
-                      child: Center(
-                        child: Icon(CupertinoIcons.photo,
-                            size: 40, color: CupertinoColors.systemGrey),
+          child: Stack(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: mediaUrl.isNotEmpty
+                    ? CachedNetworkImage(
+                        imageUrl: mediaUrl,
+                        placeholder: (_, __) => const SizedBox(
+                          height: 150,
+                          child: Center(child: CupertinoActivityIndicator()),
+                        ),
+                        errorWidget: (_, __, ___) => const SizedBox(
+                          height: 150,
+                          child: Center(
+                            child: Icon(CupertinoIcons.photo,
+                                size: 40, color: CupertinoColors.systemGrey),
+                          ),
+                        ),
+                        fit: BoxFit.cover,
+                      )
+                    : const SizedBox(
+                        height: 150,
+                        child: Center(
+                          child: Icon(CupertinoIcons.photo,
+                              size: 40, color: CupertinoColors.systemGrey),
+                        ),
                       ),
+              ),
+              // Fix 9: Fullscreen icon overlay
+              if (mediaUrl.isNotEmpty)
+                Positioned(
+                  bottom: 4,
+                  right: 4,
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.black.withValues(alpha: 0.5),
+                      borderRadius: BorderRadius.circular(4),
                     ),
-                    fit: BoxFit.cover,
-                  )
-                : const SizedBox(
-                    height: 150,
-                    child: Center(
-                      child: Icon(CupertinoIcons.photo,
-                          size: 40, color: CupertinoColors.systemGrey),
+                    child: const Icon(
+                      CupertinoIcons.fullscreen,
+                      size: 14,
+                      color: CupertinoColors.white,
                     ),
                   ),
+                ),
+            ],
           ),
         ),
         if (caption.isNotEmpty) ...[
@@ -1645,4 +1884,81 @@ class _VideoPlayerPageState extends State<_VideoPlayerPage> {
       ),
     );
   }
+}
+
+// --- TYPING INDICATOR ---
+class _TypingIndicator extends StatefulWidget {
+  const _TypingIndicator();
+
+  @override
+  State<_TypingIndicator> createState() => _TypingIndicatorState();
+}
+
+class _TypingIndicatorState extends State<_TypingIndicator>
+    with TickerProviderStateMixin {
+  late List<AnimationController> _controllers;
+  late List<Animation<double>> _animations;
+
+  @override
+  void initState() {
+    super.initState();
+    _controllers = List.generate(3, (i) => AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    ));
+    _animations = _controllers.map((c) => Tween(begin: 0.0, end: -6.0)
+        .animate(CurvedAnimation(parent: c, curve: Curves.easeInOut))).toList();
+
+    for (int i = 0; i < 3; i++) {
+      Future.delayed(Duration(milliseconds: i * 150), () {
+        if (mounted) _controllers[i].repeat(reverse: true);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers) c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(3, (i) => AnimatedBuilder(
+        animation: _animations[i],
+        builder: (_, __) => Transform.translate(
+          offset: Offset(0, _animations[i].value),
+          child: Container(
+            width: 6, height: 6,
+            margin: const EdgeInsets.symmetric(horizontal: 2),
+            decoration: const BoxDecoration(
+              color: Color(0xFF8E8E93),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ),
+      )),
+    );
+  }
+}
+
+// --- CHAT BACKGROUND PAINTER ---
+class _ChatBackgroundPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFF000000).withValues(alpha: 0.03)
+      ..style = PaintingStyle.fill;
+    const spacing = 24.0;
+    for (double x = 0; x < size.width; x += spacing) {
+      for (double y = 0; y < size.height; y += spacing) {
+        canvas.drawCircle(Offset(x, y), 1.2, paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

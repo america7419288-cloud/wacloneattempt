@@ -765,6 +765,14 @@ function listenToStoryOutbox(sock) {
                         image: { url: data.url },
                         caption: data.caption || ''
                     });
+                    // Write own story to Firestore so "My Status" shows
+                    await db.collection('stories').add({
+                        senderId: '919728470719@s.whatsapp.net',
+                        senderName: data.senderName || 'Me',
+                        url: data.url,
+                        text: data.caption || '',
+                        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                    });
                     await db.collection('outbox_stories').doc(change.doc.id).delete();
                 } catch (error) {
                     console.error("❌ Status upload failed:", error);

@@ -1,15 +1,19 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class StatusViewScreen extends StatefulWidget {
   final String url;
   final String senderName;
+  final String? senderJid;
   final VoidCallback? onFinished;
 
   const StatusViewScreen({
     super.key,
     required this.url,
     required this.senderName,
+    this.senderJid,
     this.onFinished,
   });
 
@@ -22,11 +26,11 @@ class _StatusViewScreenState extends State<StatusViewScreen>
   late AnimationController _progressController;
   Timer? _timer;
   bool _imageLoaded = false;
+  final TextEditingController _replyController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    // 5 second timer for the status
     _progressController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 5),
@@ -34,12 +38,9 @@ class _StatusViewScreenState extends State<StatusViewScreen>
         setState(() {});
       });
 
-    // Don't start forward() here — wait until image loads
     _progressController.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
-        if (widget.onFinished != null) {
-          widget.onFinished!();
-        }
+        widget.onFinished?.call();
         Navigator.of(context).pop();
       }
     });
@@ -48,17 +49,24 @@ class _StatusViewScreenState extends State<StatusViewScreen>
   @override
   void dispose() {
     _progressController.dispose();
+    _replyController.dispose();
     _timer?.cancel();
     super.dispose();
   }
 
-  void _onTapDown(TapDownDetails details) {
-    _progressController.stop();
-  }
-
-  void _onTapUp(TapUpDetails details) {
-    // Resume animation
-    _progressController.forward();
+  void _sendReply() {
+    final text = _replyController.text.trim();
+    if (text.isEmpty) return;
+    HapticFeedback.selectionClick();
+    if (widget.senderJid != null && widget.senderJid!.isNotEmpty) {
+      FirebaseFirestore.instance.collection('outbox').add({
+        'to': widget.senderJid,
+        'text': text,
+        'status': 'pending',
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+    }
+    _replyController.clear();
   }
 
   @override
@@ -66,9 +74,21 @@ class _StatusViewScreenState extends State<StatusViewScreen>
     return CupertinoPageScaffold(
       backgroundColor: CupertinoColors.black,
       child: GestureDetector(
-        onTapDown: _onTapDown,
-        onTapUp: _onTapUp,
-        onTapCancel: () => _progressController.forward(),
+        // Fix 12: Tap left to restart, tap right to skip forward
+        onTapUp: (details) {
+          final screenWidth = MediaQuery.of(context).size.width;
+          if (details.globalPosition.dx > screenWidth / 2) {
+            widget.onFinished?.call();
+            Navigator.of(context).pop();
+          } else {
+            HapticFeedback.selectionClick();
+            _progressController.reset();
+            if (_imageLoaded) _progressController.forward();
+          }
+        },
+        // Long press to pause/resume
+        onLongPressStart: (_) => _progressController.stop(),
+        onLongPressEnd: (_) => _progressController.forward(),
         child: SafeArea(
           child: Stack(
             children: [
@@ -79,7 +99,6 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                   fit: BoxFit.contain,
                   loadingBuilder: (context, child, loadingProgress) {
                     if (loadingProgress == null) {
-                      // Image loaded — start the progress timer
                       if (!_imageLoaded) {
                         _imageLoaded = true;
                         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -145,11 +164,10 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                             ),
                           ),
                           const SizedBox(width: 8),
-                          // Avatar placeholder
                           Container(
                             width: 36,
                             height: 36,
-                            decoration: BoxDecoration(
+                            decoration: const BoxDecoration(
                               shape: BoxShape.circle,
                               color: CupertinoColors.systemGrey,
                             ),
@@ -173,6 +191,66 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                             ),
                           ),
                         ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              // Fix 13: Reply input bar at bottom
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [
+                        CupertinoColors.black.withValues(alpha: 0.6),
+                        CupertinoColors.black.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: CupertinoColors.white.withValues(alpha: 0.5),
+                              width: 1,
+                            ),
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          child: CupertinoTextField(
+                            controller: _replyController,
+                            placeholder: 'Reply to ${widget.senderName}...',
+                            placeholderStyle: TextStyle(
+                              color: CupertinoColors.white.withValues(alpha: 0.5),
+                              fontSize: 15,
+                            ),
+                            style: const TextStyle(
+                              color: CupertinoColors.white,
+                              fontSize: 15,
+                            ),
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                            decoration: null,
+                            onTap: () => _progressController.stop(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      CupertinoButton(
+                        padding: EdgeInsets.zero,
+                        onPressed: _sendReply,
+                        child: const Icon(
+                          CupertinoIcons.arrow_right_circle_fill,
+                          color: CupertinoColors.white,
+                          size: 34,
+                        ),
                       ),
                     ],
                   ),

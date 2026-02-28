@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
@@ -388,7 +389,6 @@ class _RecentStories extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: stories.map((data) {
         final senderName = data['senderName'] as String? ?? 'Unknown';
-        final caption = data['caption'] as String? ?? '';
         final profileUrl = data['profileUrl'] as String?;
         final letter = senderName.isNotEmpty
             ? senderName[0].toUpperCase()
@@ -487,18 +487,14 @@ class _RecentStories extends StatelessWidget {
                           color: CupertinoColors.label.resolveFrom(context),
                         ),
                       ),
-                      if (caption.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          caption,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            color: CupertinoColors.systemGrey,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      const SizedBox(height: 2),
+                      Text(
+                        _timeAgo(data['timestamp'] as Timestamp?),
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: CupertinoColors.systemGrey,
                         ),
-                      ],
+                      ),
                     ],
                   ),
                 ),
@@ -508,5 +504,15 @@ class _RecentStories extends StatelessWidget {
         );
       }).toList(),
     );
+  }
+
+  static String _timeAgo(Timestamp? ts) {
+    if (ts == null) return '';
+    final diff = DateTime.now().difference(ts.toDate());
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ago';
+    if (diff.inDays < 7) return '${diff.inDays}d ago';
+    return '${ts.toDate().day}/${ts.toDate().month}';
   }
 }

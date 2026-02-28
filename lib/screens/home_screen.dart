@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'status_screen.dart';
 import 'calls_screen.dart';
 import 'chats_list_screen.dart';
@@ -13,6 +14,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late CupertinoTabController _tabController;
+  int _currentIndex = 2;
 
   @override
   void initState() {
@@ -34,21 +36,25 @@ class _HomeScreenState extends State<HomeScreen> {
       tabBar: CupertinoTabBar(
         activeColor: CupertinoColors.systemBlue,
         inactiveColor: CupertinoColors.systemGrey,
+        onTap: (index) {
+          HapticFeedback.selectionClick();
+          setState(() => _currentIndex = index);
+        },
         items: [
-          const BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.radiowaves_right),
+          BottomNavigationBarItem(
+            icon: _AnimatedTabIcon(icon: CupertinoIcons.radiowaves_right, selected: _currentIndex == 0),
             label: 'Status',
           ),
-          const BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.phone),
+          BottomNavigationBarItem(
+            icon: _AnimatedTabIcon(icon: CupertinoIcons.phone, selected: _currentIndex == 1),
             label: 'Calls',
           ),
-          const BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.chat_bubble_2_fill),
+          BottomNavigationBarItem(
+            icon: _AnimatedTabIcon(icon: CupertinoIcons.chat_bubble_2_fill, selected: _currentIndex == 2),
             label: 'Chats',
           ),
-          const BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.settings),
+          BottomNavigationBarItem(
+            icon: _AnimatedTabIcon(icon: CupertinoIcons.settings, selected: _currentIndex == 3),
             label: 'Settings',
           ),
         ],
@@ -77,6 +83,57 @@ class _HomeScreenState extends State<HomeScreen> {
             );
         }
       },
+    );
+  }
+}
+
+class _AnimatedTabIcon extends StatefulWidget {
+  final IconData icon;
+  final bool selected;
+  const _AnimatedTabIcon({required this.icon, required this.selected});
+  @override
+  State<_AnimatedTabIcon> createState() => _AnimatedTabIconState();
+}
+
+class _AnimatedTabIconState extends State<_AnimatedTabIcon>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _c;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 350),
+    );
+    _scale = Tween(begin: 1.0, end: 1.25).animate(
+      CurvedAnimation(parent: _c, curve: Curves.elasticOut),
+    );
+    if (widget.selected) _c.forward();
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedTabIcon old) {
+    super.didUpdateWidget(old);
+    if (widget.selected && !old.selected) _c.forward(from: 0);
+    if (!widget.selected && old.selected) _c.reverse();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _scale,
+      builder: (_, __) => Transform.scale(
+        scale: _scale.value,
+        child: Icon(widget.icon, size: 24),
+      ),
     );
   }
 }
