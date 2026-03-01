@@ -383,6 +383,7 @@ async function startWhatsApp() {
             listenersStarted = true;
             // Call listeners now that connection is open
             unsubscribers.push(listenToOutbox(sock));
+            unsubscribers.push(listenToMediaOutbox(sock));
             unsubscribers.push(listenToAddressBook(sock));
             unsubscribers.push(listenToStoryOutbox(sock));
             unsubscribers.push(listenToCommands(sock));
@@ -461,6 +462,7 @@ async function startWhatsApp() {
                         senderName: statusName,
                         text: msg.message.conversation || "",
                         url: mediaUrl,
+                        type: type === 'videoMessage' ? 'video' : (mediaUrl ? 'image' : 'text'),
                         timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     });
                 } else {
@@ -715,6 +717,17 @@ function listenToOutbox(sock) {
                 const data = change.doc.data();
                 const docId = change.doc.id;
                 try {
+                    // NEW: Bug 12 validation
+                    if (!data.to || !data.text) {
+                        console.warn(`⚠️ Skipping outbox doc ${docId}: missing 'to' or 'text'`);
+                        await db.collection('outbox').doc(docId).delete();
+                        continue;
+                    }
+                    if (!data.to.endsWith('@s.whatsapp.net') && !data.to.endsWith('@g.us')) {
+                        console.warn(`⚠️ Invalid JID format: ${data.to}`);
+                        await db.collection('outbox').doc(docId).delete();
+                        continue;
+                    }
                     let quotedMsg = undefined;
                     if (data.replyTo && data.replyTo.msgKeyId) {
                         try {
@@ -746,6 +759,99 @@ function listenToOutbox(sock) {
                     await db.collection('outbox').doc(docId).delete();
                 } catch (error) {
                     await db.collection('outbox').doc(docId).update({ status: 'error' });
+                    if (data.localId) {
+                        const mSnap = await db.collection('messages').where('localId', '==', data.localId).limit(1).get();
+                        if (!mSnap.empty) await mSnap.docs[0].ref.update({ deliveryStatus: 'error' });
+                    }
+                }
+            }
+        }
+    });
+}
+
+// 6a. MEDIA OUTBOX
+function listenToMediaOutbox(sock) {
+    console.log('🖼️ Listening for outgoing media from Flutter...');
+    return db.collection('outbox_media').where('status', '==', 'pending').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                const docId = change.doc.id;
+                try {
+                    // NEW: Bug 12 validation
+                    if (!data.to || !data.url) {
+                        console.warn(`⚠️ Skipping outbox_media doc ${docId}: missing 'to' or 'url'`);
+                        await db.collection('outbox_media').doc(docId).delete();
+                        continue;
+                    }
+                    if (!data.to.endsWith('@s.whatsapp.net') && !data.to.endsWith('@g.us')) {
+                        console.warn(`⚠️ Invalid JID format: ${data.to}`);
+                        await db.collection('outbox_media').doc(docId).delete();
+                        continue;
+                    }
+                    let quotedMsg = undefined;
+                    if (data.replyTo && data.replyTo.msgKeyId) {
+                        try {
+                            const quotedSnap = await db.collection('messages').where('msgKeyId', '==', data.replyTo.msgKeyId).limit(1).get();
+                            if (!quotedSnap.empty) {
+                                const qData = quotedSnap.docs[0].data();
+                                quotedMsg = {
+                                    key: { id: qData.msgKeyId, fromMe: qData.isMe, remoteJid: qData.chatId },
+                                    message: { conversation: qData.text }
+                                };
+                            }
+                        } catch (e) { console.error("Could not fetch quote context:", e); }
+                    }
+
+                    let messagePayload = {};
+                    if (data.type === 'image') {
+                        messagePayload = { image: { url: data.url }, caption: data.caption || '' };
+                    } else if (data.type === 'video') {
+                        messagePayload = { video: { url: data.url }, caption: data.caption || '' };
+                    } else if (data.type === 'audio') {
+                        messagePayload = { audio: { url: data.url }, ptt: true };
+                    } else if (data.type === 'file') {
+                        messagePayload = { document: { url: data.url }, fileName: data.fileName || 'document' };
+                    } else {
+                        throw new Error(`Unsupported media type: ${data.type}`);
+                    }
+
+                    const sentMsg = await sock.sendMessage(data.to, messagePayload, { quoted: quotedMsg });
+
+                    if (sentMsg && sentMsg.key && sentMsg.key.id) {
+                        let matchRef = null;
+                        if (data.localId) {
+                            const localSnap = await db.collection('messages')
+                                .where('localId', '==', data.localId)
+                                .limit(1)
+                                .get();
+                            if (!localSnap.empty) matchRef = localSnap.docs[0].ref;
+                        }
+                        if (!matchRef) {
+                            const urlSnap = await db.collection('messages')
+                                .where('chatId', '==', data.to)
+                                .where('mediaUrl', '==', data.url)
+                                .where('isMe', '==', true)
+                                .limit(1)
+                                .get();
+                            if (!urlSnap.empty) matchRef = urlSnap.docs[0].ref;
+                        }
+                        if (matchRef) {
+                            await matchRef.update({
+                                msgKeyId: sentMsg.key.id,
+                                deliveryStatus: 'sent',
+                            });
+                        }
+                    }
+
+                    await db.collection('outbox_media').doc(docId).delete();
+                } catch (error) {
+                    console.error('listenToMediaOutbox error:', error);
+                    await db.collection('outbox_media').doc(docId).update({ status: 'error' });
+                    if (data.localId) {
+                        const mSnap = await db.collection('messages').where('localId', '==', data.localId).limit(1).get();
+                        if (!mSnap.empty) await mSnap.docs[0].ref.update({ deliveryStatus: 'error' });
+                    }
                 }
             }
         }
@@ -761,16 +867,21 @@ function listenToStoryOutbox(sock) {
                 const data = change.doc.data();
                 try {
                     console.log(`🚀 Posting new status to WhatsApp...`);
-                    await sock.sendMessage('status@broadcast', {
-                        image: { url: data.url },
-                        caption: data.caption || ''
-                    });
+                    let storyPayload;
+                    if (data.type === 'video') {
+                        storyPayload = { video: { url: data.url }, caption: data.caption || '' };
+                    } else {
+                        storyPayload = { image: { url: data.url }, caption: data.caption || '' };
+                    }
+                    await sock.sendMessage('status@broadcast', storyPayload);
+
                     // Write own story to Firestore so "My Status" shows
                     await db.collection('stories').add({
                         senderId: '919728470719@s.whatsapp.net',
                         senderName: data.senderName || 'Me',
                         url: data.url,
                         text: data.caption || '',
+                        type: data.type || 'image',
                         timestamp: admin.firestore.FieldValue.serverTimestamp(),
                     });
                     await db.collection('outbox_stories').doc(change.doc.id).delete();

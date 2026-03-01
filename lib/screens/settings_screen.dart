@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../theme_provider.dart';
+import 'wallpaper_picker_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -190,11 +191,12 @@ class SettingsScreen extends StatelessWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
+                              Text(
                                 'Ankit',
                                 style: TextStyle(
                                   fontSize: 22,
                                   fontWeight: FontWeight.w600,
+                                  color: CupertinoColors.label.resolveFrom(context),
                                 ),
                               ),
                               const SizedBox(height: 2),
@@ -288,6 +290,18 @@ class SettingsScreen extends StatelessWidget {
                       icon: CupertinoIcons.chat_bubble_fill,
                       iconBgColor: CupertinoColors.systemGreen,
                       title: 'Chats',
+                    ),
+                    _SettingsTile(
+                      icon: CupertinoIcons.photo,
+                      iconBgColor: CupertinoColors.systemPurple,
+                      title: 'Chat Wallpaper',
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          CupertinoPageRoute(
+                            builder: (_) => const WallpaperPickerScreen(),
+                          ),
+                        );
+                      },
                     ),
                     _SettingsTile(
                       icon: CupertinoIcons.bell_fill,
@@ -409,9 +423,10 @@ class _SettingsTile extends StatelessWidget {
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w400,
+                  color: CupertinoColors.label.resolveFrom(context),
                 ),
               ),
             ),

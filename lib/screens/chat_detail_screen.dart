@@ -1,3 +1,6 @@
+import 'dart:ui' as ui;
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -6,7 +9,11 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:photo_view/photo_view.dart';
 import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:flutter/material.dart' show LinearProgressIndicator, AlwaysStoppedAnimation;
 import 'contact_info_screen.dart';
+import '../chat_wallpaper_widget.dart';
+import 'status_screen.dart' show kOwnJid;
 
 const _incomingBubbleColor = CupertinoDynamicColor.withBrightness(
   color: Color(0xFFE5E5EA),
@@ -74,12 +81,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       'from': 'me',
       'isMe': true,
       'localId': localId,
+      'deliveryStatus': 'pending',
       'timestamp': FieldValue.serverTimestamp(),
     };
     if (_replyingTo != null) {
       msgPayload['replyTo'] = {
         'text': _replyingTo!['text'] ?? '',
         'author': _replyingTo!['senderName'] ?? _replyingTo!['from'] ?? '',
+        if (_replyingTo!['mediaUrl'] != null) 'mediaUrl': _replyingTo!['mediaUrl'],
       };
     }
     FirebaseFirestore.instance.collection('messages').add(msgPayload);
@@ -116,34 +125,36 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   void _showLongPressMenu(BuildContext ctx, Map<String, dynamic> data, String docId) {
-    showCupertinoModalPopup(
+    showCupertinoDialog(
       context: ctx,
-      builder: (_) => CupertinoActionSheet(
+      builder: (dialogCtx) => CupertinoAlertDialog(
+        title: const Text('Message Options'),
         actions: [
-          CupertinoActionSheetAction(
-            onPressed: () { Navigator.pop(ctx); _setReply(data); },
+          CupertinoDialogAction(
+            onPressed: () { Navigator.pop(dialogCtx); _setReply(data); },
             child: const Text('Reply'),
           ),
-          CupertinoActionSheetAction(
+          CupertinoDialogAction(
             onPressed: () {
-              Navigator.pop(ctx);
+              Navigator.pop(dialogCtx);
               Clipboard.setData(ClipboardData(text: data['text'] ?? ''));
             },
             child: const Text('Copy'),
           ),
-          CupertinoActionSheetAction(
+          CupertinoDialogAction(
             isDestructiveAction: true,
             onPressed: () async {
-              Navigator.pop(ctx);
+              Navigator.pop(dialogCtx);
               await FirebaseFirestore.instance.collection('messages').doc(docId).delete();
             },
             child: const Text('Delete'),
           ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Cancel'),
+          ),
         ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
       ),
     );
   }
@@ -152,7 +163,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     const emojis = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
     showCupertinoModalPopup(
       context: ctx,
-      builder: (_) => TweenAnimationBuilder<double>(
+      builder: (modalCtx) => TweenAnimationBuilder<double>(
         tween: Tween(begin: 0.0, end: 1.0),
         duration: const Duration(milliseconds: 400),
         curve: Curves.elasticOut,
@@ -186,7 +197,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     return GestureDetector(
                       onTap: () {
                         HapticFeedback.selectionClick();
-                        Navigator.pop(ctx);
+                        Navigator.pop(modalCtx);
                         FirebaseFirestore.instance.collection('outbox_reactions').add({
                           'chatJid': widget.contactJid,
                           'msgKeyId': data['msgKeyId'] ?? '',
@@ -226,66 +237,136 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
+  Future<void> _uploadAndSendMedia(XFile file, String type) async {
+    showCupertinoDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const CupertinoAlertDialog(
+        content: Padding(
+          padding: EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CupertinoActivityIndicator(radius: 14),
+              SizedBox(height: 12),
+              Text('Uploading media...'),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await Future.delayed(const Duration(milliseconds: 100)); // Ensure dialog route pushes
+
+    try {
+      final url = Uri.parse("https://api.cloudinary.com/v1_1/druwafmub/${type == 'video' ? 'video' : 'image'}/upload");
+      final request = http.MultipartRequest('POST', url)
+        ..fields['upload_preset'] = 'whatsappClone'
+        ..files.add(await http.MultipartFile.fromPath('file', file.path));
+
+      final response = await request.send();
+      if (response.statusCode != 200) {
+        throw Exception('Upload failed: HTTP ${response.statusCode}');
+      }
+
+      final responseData = await response.stream.bytesToString();
+      final jsonResponse = jsonDecode(responseData);
+      final String? secureUrl = jsonResponse['secure_url'];
+
+      if (secureUrl == null || secureUrl.isEmpty) {
+        throw Exception('No URL returned from Cloudinary');
+      }
+
+      final localId = '${DateTime.now().millisecondsSinceEpoch}_${widget.contactJid.hashCode}';
+
+      await FirebaseFirestore.instance.collection('messages').add({
+        'chatId': widget.contactJid,
+        'type': type,
+        'mediaUrl': secureUrl,
+        'text': '',
+        'from': 'me',
+        'isMe': true,
+        'localId': localId,
+        'deliveryStatus': 'pending',
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      final outboxPayload = <String, dynamic>{
+        'to': widget.contactJid,
+        'type': type,
+        'url': secureUrl,
+        'status': 'pending',
+        'localId': localId,
+        'timestamp': FieldValue.serverTimestamp(),
+      };
+
+      if (_replyingTo != null) {
+        outboxPayload['replyTo'] = {
+          'msgKeyId': _replyingTo!['msgKeyId'] ?? '',
+        };
+        setState(() => _replyingTo = null);
+      }
+
+      await FirebaseFirestore.instance.collection('outbox_media').add(outboxPayload);
+
+      if (mounted) Navigator.of(context, rootNavigator: true).pop(); // Dismiss loading
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop(); // Dismiss loading
+      if (mounted) {
+        showCupertinoDialog(
+          context: context,
+          builder: (dialogCtx) => CupertinoAlertDialog(
+            title: const Text('Upload Failed'),
+            content: Text(e.toString()),
+            actions: [
+              CupertinoDialogAction(
+                child: const Text('OK'),
+                onPressed: () => Navigator.pop(dialogCtx),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+  }
+
   void _pickAndSendMedia() async {
     final picker = ImagePicker();
-    showCupertinoModalPopup(
+    showCupertinoDialog(
       context: context,
-      builder: (ctx) => CupertinoActionSheet(
+      builder: (dialogCtx) => CupertinoAlertDialog(
+        title: const Text('Attach Media'),
         actions: [
-          CupertinoActionSheetAction(
+          CupertinoDialogAction(
             onPressed: () async {
-              Navigator.pop(ctx);
+              Navigator.pop(dialogCtx);
               final file = await picker.pickImage(source: ImageSource.gallery);
-              if (file != null) {
-                // Placeholder: send image path as text for now
-                FirebaseFirestore.instance.collection('messages').add({
-                  'chatId': widget.contactJid,
-                  'text': '📷 Image selected: ${file.name}',
-                  'from': 'me',
-                  'isMe': true,
-                  'timestamp': FieldValue.serverTimestamp(),
-                });
-              }
+              if (file != null) _uploadAndSendMedia(file, 'image');
             },
             child: const Text('Photo Library'),
           ),
-          CupertinoActionSheetAction(
+          CupertinoDialogAction(
             onPressed: () async {
-              Navigator.pop(ctx);
+              Navigator.pop(dialogCtx);
               final file = await picker.pickImage(source: ImageSource.camera);
-              if (file != null) {
-                FirebaseFirestore.instance.collection('messages').add({
-                  'chatId': widget.contactJid,
-                  'text': '📷 Photo taken: ${file.name}',
-                  'from': 'me',
-                  'isMe': true,
-                  'timestamp': FieldValue.serverTimestamp(),
-                });
-              }
+              if (file != null) _uploadAndSendMedia(file, 'image');
             },
             child: const Text('Camera'),
           ),
-          CupertinoActionSheetAction(
+          CupertinoDialogAction(
             onPressed: () async {
-              Navigator.pop(ctx);
+              Navigator.pop(dialogCtx);
               final file = await picker.pickVideo(source: ImageSource.gallery);
-              if (file != null) {
-                FirebaseFirestore.instance.collection('messages').add({
-                  'chatId': widget.contactJid,
-                  'text': '🎬 Video selected: ${file.name}',
-                  'from': 'me',
-                  'isMe': true,
-                  'timestamp': FieldValue.serverTimestamp(),
-                });
-              }
+              if (file != null) _uploadAndSendMedia(file, 'video');
             },
             child: const Text('Video'),
           ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Cancel'),
+          ),
         ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.pop(ctx),
-          child: const Text('Cancel'),
-        ),
       ),
     );
   }
@@ -346,34 +427,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  StreamBuilder<DocumentSnapshot>(
-                    stream: FirebaseFirestore.instance
-                        .collection('contacts')
-                        .doc(widget.contactJid)
-                        .snapshots(),
-                    builder: (context, snap) {
-                      String subtitle = 'last seen recently';
-                      if (snap.hasData && snap.data!.exists) {
-                        final cData = snap.data!.data() as Map<String, dynamic>? ?? {};
-                        final presence = cData['presence'] as String? ?? '';
-                        if (presence == 'composing') {
-                          subtitle = 'typing...';
-                        } else if (presence == 'available') {
-                          subtitle = 'online';
-                        }
-                      }
-                      return Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: subtitle == 'typing...'
-                              ? CupertinoColors.systemGreen
-                              : CupertinoColors.systemGrey,
-                          fontWeight: FontWeight.w400,
-                        ),
-                      );
-                    },
-                  ),
+                  _PresenceSubtitle(contactJid: widget.contactJid, ownJid: kOwnJid),
                 ],
               ),
             ),
@@ -399,21 +453,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       ),
       child: Stack(
         children: [
-          // 1A: Dot pattern background
-          Positioned.fill(
-            child: Container(
-              color: CupertinoDynamicColor.resolve(
-                const CupertinoDynamicColor.withBrightness(
-                  color: Color(0xFFEFEBE0),
-                  darkColor: Color(0xFF0D1117),
-                ),
-                context,
-              ),
-            ),
-          ),
-          Positioned.fill(
-            child: CustomPaint(painter: _ChatBackgroundPainter()),
-          ),
+          // Animated wallpaper background
+          const Positioned.fill(child: ChatWallpaperBackground()),
           SafeArea(
             child: Column(
               children: [
@@ -461,8 +502,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               ),
             ),
             // Input bar (with admin restriction + typing indicator)
-              _buildTypingIndicator(),
-              _buildRestrictedInputBar(),
+              _buildBottomBar(),
             ],
           ),
         ),
@@ -616,126 +656,120 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             final senderName = data['senderName'] as String? ?? '';
             final isNewest = index == 0;
 
-            return AnimatedSlide(
-              key: ValueKey(docId),
-              offset: isNewest ? Offset(isOutgoing ? 0.08 : -0.08, 0) : Offset.zero,
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutCubic,
-              child: AnimatedOpacity(
-                opacity: 1.0,
-                duration: const Duration(milliseconds: 200),
-                child: Column(
-                  children: [
-                    if (dateHeader != null) dateHeader,
-                    // Group sender name above incoming bubble
-                    if (!isOutgoing && isGroup && senderName.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 14, bottom: 2),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            senderName,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: _senderColor(senderName),
-                            ),
-                          ),
-                        ),
-                      ),
-                    _SwipableBubbleRow(
-                      data: data,
-                      time: timeStr,
-                      isOutgoing: isOutgoing,
-                      docId: docId,
-                      onReply: _setReply,
-                      onLongPress: () {
-                        if (data['deleted'] == true) return;
-                        HapticFeedback.mediumImpact();
-                        _showLongPressMenu(context, data, docId);
-                      },
-                      onDoubleTap: () {
-                        if (data['deleted'] == true) return;
-                        HapticFeedback.selectionClick();
-                        _showReactionPicker(context, data);
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            );
+            return isNewest
+                ? TweenAnimationBuilder<Offset>(
+                    key: ValueKey('slide_$docId'),
+                    tween: Tween<Offset>(
+                        begin: const Offset(0.0, 0.5), end: Offset.zero),
+                    duration: const Duration(milliseconds: 250),
+                    curve: Curves.easeOutCubic,
+                    builder: (_, translation, child) =>
+                        FractionalTranslation(translation: translation, child: child!),
+                    child: _buildMessageItem(context, data, docId, isOutgoing, isGroup, senderName, dateHeader, timeStr),
+                  )
+                : _buildMessageItem(context, data, docId, isOutgoing, isGroup, senderName, dateHeader, timeStr);
           },
         );
       },
     );
   }
 
-  // Fix 8: Typing indicator
-  Widget _buildTypingIndicator() {
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('contacts')
-          .doc(widget.contactJid)
-          .snapshots(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData || !snapshot.data!.exists) return const SizedBox.shrink();
-        final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-        final presence = data['presence'] as String? ?? '';
-        if (presence != 'composing') return const SizedBox.shrink();
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: Container(
-            margin: const EdgeInsets.only(left: 12, bottom: 4, top: 2),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: CupertinoDynamicColor.resolve(
-                const CupertinoDynamicColor.withBrightness(
-                  color: Color(0xFFE5E5EA),
-                  darkColor: Color(0xFF2C2C2E),
+  Widget _buildMessageItem(BuildContext context, Map<String, dynamic> data, String docId, bool isOutgoing, bool isGroup, String senderName, Widget? dateHeader, String timeStr) {
+    return Column(
+      children: [
+        if (dateHeader != null) dateHeader,
+        if (!isOutgoing && isGroup && senderName.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 14, bottom: 2),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                senderName,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: _senderColor(senderName),
                 ),
-                context,
               ),
-              borderRadius: BorderRadius.circular(18),
             ),
-            child: const _TypingIndicator(),
           ),
-        );
-      },
+        _SwipableBubbleRow(
+          data: data,
+          time: timeStr,
+          isOutgoing: isOutgoing,
+          docId: docId,
+          onReply: _setReply,
+          onLongPress: () {
+            if (data['deleted'] == true) return;
+            HapticFeedback.mediumImpact();
+            _showLongPressMenu(context, data, docId);
+          },
+          onDoubleTap: () {
+            if (data['deleted'] == true) return;
+            HapticFeedback.selectionClick();
+            _showReactionPicker(context, data);
+          },
+        ),
+      ],
     );
   }
 
-  Widget _buildRestrictedInputBar() {
+  Widget _buildBottomBar() {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('contacts')
           .doc(widget.contactJid)
           .snapshots(),
       builder: (context, snapshot) {
+        bool isAdminOnly = false;
+        bool isTyping = false;
         if (snapshot.hasData && snapshot.data!.exists) {
-          final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-          final isAdminOnly = data['onlyAdminsCanMessage'] == true;
-          if (isAdminOnly) {
-            return Container(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              decoration: BoxDecoration(
-                color: CupertinoColors.systemBackground.resolveFrom(context),
-                border: const Border(
-                  top: BorderSide(color: CupertinoColors.separator, width: 0.5),
+          final d = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+          isAdminOnly = d['onlyAdminsCanMessage'] == true;
+          isTyping = d['presence'] == 'composing';
+        }
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isTyping)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.only(left: 12, bottom: 4, top: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: CupertinoDynamicColor.resolve(
+                      const CupertinoDynamicColor.withBrightness(
+                        color: Color(0xFFE5E5EA),
+                        darkColor: Color(0xFF2C2C2E),
+                      ),
+                      context,
+                    ),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: const _TypingIndicator(),
                 ),
               ),
-              child: const Center(
-                child: Text(
-                  'Only admins can send messages',
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: CupertinoColors.systemGrey,
+            if (isAdminOnly)
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.systemBackground.resolveFrom(context),
+                  border: const Border(
+                    top: BorderSide(color: CupertinoColors.separator, width: 0.5),
                   ),
                 ),
-              ),
-            );
-          }
-        }
-        return _buildInputBar();
+                child: const Center(
+                  child: Text(
+                    'Only admins can send messages',
+                    style: TextStyle(fontSize: 14, color: CupertinoColors.systemGrey),
+                  ),
+                ),
+              )
+            else
+              _buildInputBar(),
+          ],
+        );
       },
     );
   }
@@ -760,34 +794,47 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 child: Row(
                   children: [
                     Container(
-                      width: 3,
-                      height: 36,
+                      width: 4,
+                      height: 48,
                       decoration: BoxDecoration(
-                    color: CupertinoColors.systemBlue,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _replyingTo!['senderName'] ?? _replyingTo!['from'] ?? '',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: CupertinoColors.systemBlue),
+                        color: CupertinoColors.systemBlue,
+                        borderRadius: BorderRadius.circular(2),
                       ),
-                      Text(
-                        _replyingTo!['text'] ?? '',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13, color: CupertinoColors.systemGrey),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _replyingTo!['senderName'] ?? _replyingTo!['from'] ?? '',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CupertinoColors.systemBlue),
+                          ),
+                          Text(
+                            _replyingTo!['text']?.toString().isNotEmpty == true ? _replyingTo!['text'] : 'Photo',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 14, color: CupertinoColors.systemGrey),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
+                    ),
+                    if (_replyingTo!['mediaUrl'] != null && _replyingTo!['mediaUrl'].toString().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8.0),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: CachedNetworkImage(
+                            imageUrl: _replyingTo!['mediaUrl'],
+                            width: 36,
+                            height: 36,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
                     CupertinoButton(
                       padding: EdgeInsets.zero,
-                      child: const Icon(CupertinoIcons.xmark_circle_fill, size: 20, color: CupertinoColors.systemGrey),
+                      child: const Icon(CupertinoIcons.xmark_circle_fill, size: 22, color: CupertinoColors.systemGrey),
                       onPressed: () => setState(() => _replyingTo = null),
                     ),
                   ],
@@ -795,12 +842,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               )
             : const SizedBox.shrink(),
         ),
-        Container(
+        ClipRect(
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
-            color: CupertinoColors.systemBackground.resolveFrom(context),
+            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.88),
             border: const Border(
-              top: BorderSide(color: CupertinoColors.separator, width: 0.5),
+              top: BorderSide(color: CupertinoColors.separator, width: 0.33),
             ),
           ),
           child: Row(
@@ -895,6 +945,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ],
           ),
         ),
+        ), // BackdropFilter
+        ), // ClipRect
       ],
     );
   }
@@ -998,6 +1050,7 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow> {
                     data: widget.data,
                     time: widget.time,
                     isOutgoing: widget.isOutgoing,
+                    docId: widget.docId,
                   ),
                 ),
               ),
@@ -1013,11 +1066,13 @@ class _ChatBubble extends StatelessWidget {
   final Map<String, dynamic> data;
   final String time;
   final bool isOutgoing;
+  final String docId;
 
   const _ChatBubble({
     required this.data,
     required this.time,
     required this.isOutgoing,
+    required this.docId,
   });
 
   @override
@@ -1037,8 +1092,7 @@ class _ChatBubble extends StatelessWidget {
             children: [
               Container(
                 constraints: BoxConstraints(
-                  minWidth: 80,
-                  maxWidth: MediaQuery.of(context).size.width * 0.72,
+                  maxWidth: MediaQuery.of(context).size.width * 0.75,
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                 decoration: BoxDecoration(
@@ -1053,17 +1107,23 @@ class _ChatBubble extends StatelessWidget {
                         ? const Radius.circular(4)
                         : const Radius.circular(16),
                   ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: CupertinoColors.black.withValues(alpha: isOutgoing ? 0.10 : 0.08),
+                      blurRadius: 4,
+                      offset: const Offset(0, 1),
+                    ),
+                  ],
                 ),
                 child: Column(
                   crossAxisAlignment: isOutgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                   children: [
                     // Reply preview
-                    if (replyTo != null && data['deleted'] != true) _buildReplyPreview(replyTo),
+                    if (replyTo != null && data['deleted'] != true) _buildReplyPreview(context, replyTo),
                     if (data['deleted'] == true)
                       // Deleted message styling
-                      Wrap(
-                        alignment: WrapAlignment.end,
-                        crossAxisAlignment: WrapCrossAlignment.end,
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             'This message was deleted',
@@ -1075,46 +1135,47 @@ class _ChatBubble extends StatelessWidget {
                                   : CupertinoColors.systemGrey,
                             ),
                           ),
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8, top: 4),
-                            child: Text(
-                              time,
-                              style: TextStyle(
-                                fontSize: 11,
-                                color: isOutgoing
-                                    ? CupertinoColors.white.withValues(alpha: 0.7)
-                                    : CupertinoColors.systemGrey,
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 8, top: 4),
+                              child: Text(
+                                time,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isOutgoing
+                                      ? CupertinoColors.white.withValues(alpha: 0.7)
+                                      : CupertinoColors.systemGrey,
+                                ),
                               ),
                             ),
                           ),
                         ],
                       )
                     else
-                      Wrap(
-                        alignment: WrapAlignment.end,
-                        crossAxisAlignment: WrapCrossAlignment.end,
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _buildContent(type),
-                          Padding(
-                            padding: const EdgeInsets.only(left: 8, top: 4),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  time,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: isOutgoing
-                                        ? CupertinoColors.white.withValues(alpha: 0.7)
-                                        : CupertinoColors.systemGrey,
-                                  ),
+                          _buildContent(context, type),
+                          const SizedBox(height: 2),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              Text(
+                                time,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isOutgoing
+                                      ? CupertinoColors.white.withValues(alpha: 0.7)
+                                      : CupertinoColors.systemGrey,
                                 ),
-                                if (isOutgoing) ...[
-                                  const SizedBox(width: 3),
-                                  _buildDeliveryTicks(),
-                                ],
+                              ),
+                              if (isOutgoing) ...[
+                                const SizedBox(width: 3),
+                                _buildDeliveryTicks(),
                               ],
-                            ),
+                            ],
                           ),
                         ],
                       ),
@@ -1130,7 +1191,7 @@ class _ChatBubble extends StatelessWidget {
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: CupertinoColors.white,
+                      color: CupertinoColors.systemBackground.resolveFrom(context),
                       borderRadius: BorderRadius.circular(12),
                       boxShadow: [
                         BoxShadow(
@@ -1156,7 +1217,7 @@ class _ChatBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildReplyPreview(Map<String, dynamic> replyTo) {
+  Widget _buildReplyPreview(BuildContext context, Map<String, dynamic> replyTo) {
     final quotedText = replyTo['text'] as String? ?? '';
     final quotedAuthor = replyTo['author'] as String? ?? '';
     // Show 'You' for own messages, otherwise use the name as-is (now resolved by bridge)
@@ -1166,8 +1227,9 @@ class _ChatBubble extends StatelessWidget {
         : isOwnNumber
             ? 'You'
             : quotedAuthor;
+    final mediaUrl = replyTo['mediaUrl'] as String?;
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 52),
+      constraints: const BoxConstraints(maxHeight: 60),
       child: Container(
         margin: const EdgeInsets.only(bottom: 4),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
@@ -1185,34 +1247,54 @@ class _ChatBubble extends StatelessWidget {
             ),
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Text(
-              displayAuthor,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: isOutgoing
-                    ? CupertinoColors.white.withValues(alpha: 0.9)
-                    : CupertinoColors.systemBlue,
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    displayAuthor,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: isOutgoing
+                          ? CupertinoColors.white.withValues(alpha: 0.9)
+                          : CupertinoColors.systemBlue,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    quotedText.isNotEmpty ? quotedText : 'Photo',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: isOutgoing
+                          ? CupertinoColors.white.withValues(alpha: 0.7)
+                          : CupertinoColors.secondaryLabel.resolveFrom(context),
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 2),
-            Text(
-              quotedText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 13,
-                color: isOutgoing
-                    ? CupertinoColors.white.withValues(alpha: 0.7)
-                    : CupertinoColors.systemGrey,
+            if (mediaUrl != null && mediaUrl.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: CachedNetworkImage(
+                  imageUrl: mediaUrl,
+                  width: 36,
+                  height: 36,
+                  fit: BoxFit.cover,
+                ),
               ),
-            ),
+            ],
           ],
         ),
       ),
@@ -1248,7 +1330,7 @@ class _ChatBubble extends StatelessWidget {
             color: CupertinoColors.white.withValues(alpha: 0.7),
           ),
         );
-      default: // pending
+      case 'sent':
         return Text(
           '✓',
           style: TextStyle(
@@ -1256,10 +1338,35 @@ class _ChatBubble extends StatelessWidget {
             color: CupertinoColors.white.withValues(alpha: 0.7),
           ),
         );
+      case 'error':
+      return GestureDetector(
+        onTap: () {
+          // Retry
+          if (data['type'] == 'image' || data['type'] == 'video' || data['type'] == 'file' || data['type'] == 'audio') {
+            FirebaseFirestore.instance.collection('outbox_media').where('localId', isEqualTo: data['localId']).limit(1).get().then((snap) {
+              if (snap.docs.isNotEmpty) snap.docs.first.reference.update({'status': 'pending'});
+            });
+          } else {
+            FirebaseFirestore.instance.collection('outbox').where('localId', isEqualTo: data['localId']).limit(1).get().then((snap) {
+              if (snap.docs.isNotEmpty) snap.docs.first.reference.update({'status': 'pending'});
+            });
+          }
+          FirebaseFirestore.instance.collection('messages').doc(docId).update({'deliveryStatus': 'pending'});
+        },
+        child: const Icon(CupertinoIcons.exclamationmark_circle, color: CupertinoColors.systemRed, size: 14),
+      );
+    default: // pending
+      return Text(
+        '✓',
+        style: TextStyle(
+          fontSize: 11,
+          color: CupertinoColors.white.withValues(alpha: 0.7),
+        ),
+      );
     }
   }
 
-  Widget _buildContent(String? type) {
+  Widget _buildContent(BuildContext context, String? type) {
     // If it's a skipped file or empty URL for a media type, show a placeholder
     final bool isSkipped = type == 'large_file_skipped';
     final String url = data['mediaUrl'] as String? ?? '';
@@ -1308,7 +1415,7 @@ class _ChatBubble extends StatelessWidget {
               style: TextStyle(
                 fontSize: 15.5,
                 color:
-                    isOutgoing ? CupertinoColors.white : CupertinoColors.black,
+                    isOutgoing ? CupertinoColors.white : CupertinoColors.label.resolveFrom(context),
               ),
             ),
             if (linkPreview != null) ...[
@@ -1351,7 +1458,7 @@ class _ChatBubble extends StatelessWidget {
                           style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w600,
-                            color: isOutgoing ? CupertinoColors.white : CupertinoColors.black,
+                            color: isOutgoing ? CupertinoColors.white : CupertinoColors.label.resolveFrom(context),
                           ),
                         ),
                       ],
@@ -1622,8 +1729,11 @@ class _VideoPreview extends StatelessWidget {
         GestureDetector(
           onTap: () {
             if (mediaUrl.isNotEmpty) {
-              launchUrl(Uri.parse(mediaUrl),
-                  mode: LaunchMode.externalApplication);
+              Navigator.of(context).push(
+                CupertinoPageRoute(
+                  builder: (_) => _VideoPlayerPage(videoUrl: mediaUrl),
+                ),
+              );
             }
           },
           child: Container(
@@ -1658,57 +1768,103 @@ class _VideoPreview extends StatelessWidget {
 }
 
 // --- AUDIO / VOICE NOTE ---
-class _AudioContent extends StatelessWidget {
+class _AudioContent extends StatefulWidget {
   final String mediaUrl;
   final bool isOutgoing;
 
-  const _AudioContent({
-    required this.mediaUrl,
-    required this.isOutgoing,
-  });
+  const _AudioContent({required this.mediaUrl, required this.isOutgoing});
+
+  @override
+  State<_AudioContent> createState() => _AudioContentState();
+}
+
+class _AudioContentState extends State<_AudioContent> {
+  AudioPlayer? _player;
+  bool _isPlaying = false;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    _player = AudioPlayer();
+    _player!.positionStream.listen((pos) {
+      if (mounted) setState(() => _position = pos);
+    });
+    _player!.durationStream.listen((dur) {
+      if (mounted) setState(() => _duration = dur ?? Duration.zero);
+    });
+    _player!.playerStateStream.listen((state) {
+      if (mounted) setState(() => _isPlaying = state.playing);
+    });
+  }
+
+  @override
+  void dispose() {
+    _player?.dispose();
+    super.dispose();
+  }
+
+  String _fmt(Duration d) {
+    final m = d.inMinutes.toString().padLeft(2, '0');
+    final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () {
-        if (mediaUrl.isNotEmpty) {
-          launchUrl(Uri.parse(mediaUrl),
-              mode: LaunchMode.externalApplication);
-        }
-      },
+    final progress = _duration.inMilliseconds > 0
+        ? _position.inMilliseconds / _duration.inMilliseconds
+        : 0.0;
+
+    return SizedBox(
+      width: 220,
       child: Row(
-        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            CupertinoIcons.mic_fill,
-            size: 22,
-            color:
-                isOutgoing ? CupertinoColors.white : CupertinoColors.systemBlue,
+          GestureDetector(
+            onTap: () async {
+              if (_isPlaying) {
+                await _player!.pause();
+              } else {
+                if (_player!.processingState == ProcessingState.idle) {
+                  await _player!.setUrl(widget.mediaUrl);
+                }
+                await _player!.play();
+              }
+            },
+            child: Icon(
+              _isPlaying ? CupertinoIcons.pause_circle_fill : CupertinoIcons.play_circle_fill,
+              size: 36,
+              color: widget.isOutgoing ? CupertinoColors.white : CupertinoColors.systemBlue,
+            ),
           ),
           const SizedBox(width: 8),
-          // Waveform-style placeholder
-          ...List.generate(12, (i) {
-            final h = 4.0 + (i % 3 == 0 ? 10.0 : (i % 2 == 0 ? 6.0 : 14.0));
-            return Container(
-              width: 3,
-              height: h,
-              margin: const EdgeInsets.symmetric(horizontal: 1),
-              decoration: BoxDecoration(
-                color: isOutgoing
-                    ? CupertinoColors.white.withValues(alpha: 0.6)
-                    : CupertinoColors.systemGrey3,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            );
-          }),
-          const SizedBox(width: 8),
-          Text(
-            'Voice note',
-            style: TextStyle(
-              fontSize: 13,
-              color: isOutgoing
-                  ? CupertinoColors.white.withValues(alpha: 0.8)
-                  : CupertinoColors.systemGrey,
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: progress.clamp(0.0, 1.0),
+                    minHeight: 3,
+                    backgroundColor: (widget.isOutgoing ? CupertinoColors.white : CupertinoColors.systemGrey3).withValues(alpha: 0.4),
+                    valueColor: AlwaysStoppedAnimation(
+                      widget.isOutgoing ? CupertinoColors.white : CupertinoColors.systemBlue,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${_fmt(_position)} / ${_fmt(_duration)}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: widget.isOutgoing
+                        ? CupertinoColors.white.withValues(alpha: 0.7)
+                        : CupertinoColors.systemGrey,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -1758,7 +1914,7 @@ class _FileContent extends StatelessWidget {
                 fontWeight: FontWeight.w500,
                 color: isOutgoing
                     ? CupertinoColors.white
-                    : CupertinoColors.black,
+                    : CupertinoColors.label.resolveFrom(context),
               ),
             ),
           ),
@@ -1967,4 +2123,59 @@ class _ChatBackgroundPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _PresenceSubtitle extends StatelessWidget {
+  final String contactJid;
+  final String ownJid;
+
+  const _PresenceSubtitle({required this.contactJid, required this.ownJid});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('contacts')
+          .doc(contactJid)
+          .snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) {
+          return const SizedBox.shrink();
+        }
+
+        final data = snapshot.data!.data() as Map<String, dynamic>;
+        final presence = data['presence'] as String? ?? 'unavailable';
+        final typingSource = data['typingSource'] as String?;
+        final isTyping = presence == 'composing' && typingSource == ownJid;
+        final isRecording =
+            presence == 'recording' && typingSource == ownJid;
+
+        String subtitleText = '';
+        if (isTyping) {
+          subtitleText = 'typing...';
+        } else if (isRecording) {
+          subtitleText = 'recording audio...';
+        } else if (presence == 'available') {
+          subtitleText = 'online';
+        }
+
+        if (subtitleText.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        return Text(
+          subtitleText,
+          style: TextStyle(
+            fontSize: 12,
+            color: (isTyping || isRecording)
+                ? CupertinoColors.systemBlue
+                : CupertinoColors.systemGrey,
+            fontWeight: (isTyping || isRecording)
+                ? FontWeight.w500
+                : FontWeight.normal,
+          ),
+        );
+      },
+    );
+  }
 }

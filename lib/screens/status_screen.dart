@@ -10,10 +10,19 @@ import 'status_view_screen.dart';
 // The user's own JID — used to identify "My Status" stories
 const String kOwnJid = '919728470719@s.whatsapp.net';
 
-class StatusScreen extends StatelessWidget {
+class StatusScreen extends StatefulWidget {
   const StatusScreen({super.key});
 
   static Widget create(BuildContext context) => const StatusScreen();
+
+  @override
+  State<StatusScreen> createState() => _StatusScreenState();
+}
+
+class _StatusScreenState extends State<StatusScreen> {
+  bool _isUploadingStory = false;
+
+
 
   void _showCupertinoAlert(BuildContext context, String title, String content) {
     showCupertinoDialog(
@@ -32,39 +41,69 @@ class StatusScreen extends StatelessWidget {
   }
 
   Future<void> _pickAndUploadStory(BuildContext context) async {
+    if (_isUploadingStory) return; // prevent double tap
+    
     final ImagePicker picker = ImagePicker();
     final XFile? image = await picker.pickImage(source: ImageSource.gallery);
     if (image == null) return;
 
+    setState(() => _isUploadingStory = true);
+    
+    // Show loading overlay
+    showCupertinoDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const CupertinoAlertDialog(
+        content: Padding(
+          padding: EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CupertinoActivityIndicator(radius: 14),
+              SizedBox(height: 12),
+              Text('Uploading status...'),
+            ],
+          ),
+        ),
+      ),
+    );
+
     try {
-      // 1. Upload to Cloudinary via REST API
       final url = Uri.parse('https://api.cloudinary.com/v1_1/druwafmub/image/upload');
       final request = http.MultipartRequest('POST', url)
         ..fields['upload_preset'] = 'whatsappClone'
         ..files.add(await http.MultipartFile.fromPath('file', image.path));
 
       final response = await request.send();
+      if (response.statusCode != 200) {
+        throw Exception('Upload failed: HTTP ${response.statusCode}');
+      }
       final responseData = await response.stream.bytesToString();
       final jsonResponse = jsonDecode(responseData);
-      final String secureUrl = jsonResponse['secure_url'];
+      final String? secureUrl = jsonResponse['secure_url'];
+      if (secureUrl == null || secureUrl.isEmpty) {
+        throw Exception('No URL returned from Cloudinary');
+      }
 
-      // 2. ONLY write to 'outbox_stories'
-      // Do NOT write to 'stories' manually. Let the bridge handle that.
       await FirebaseFirestore.instance.collection('outbox_stories').add({
         'url': secureUrl,
         'senderName': 'Ankit',
         'timestamp': FieldValue.serverTimestamp(),
-        'status': 'pending', // Bridge will see this and post to WhatsApp
+        'status': 'pending',
         'caption': '',
       });
 
+      if (context.mounted) Navigator.of(context).pop(); // dismiss loading
       if (context.mounted) {
-        _showCupertinoAlert(context, 'Success', 'Status sent to WhatsApp!');
+        _showCupertinoAlert(context, 'Success', 'Status posted successfully!');
       }
     } catch (e) {
+      if (context.mounted) Navigator.of(context).pop(); // dismiss loading
       if (context.mounted) {
-        _showCupertinoAlert(context, 'Error', e.toString());
+        _showCupertinoAlert(context, 'Upload Failed', e.toString());
       }
+    } finally {
+      if (mounted) setState(() => _isUploadingStory = false);
     }
   }
 
@@ -83,22 +122,25 @@ class StatusScreen extends StatelessWidget {
           // Parse stories once for both widgets
           final List<Map<String, dynamic>> otherStories = [];
           String? myLatestStoryUrl;
+          String myLatestStoryType = 'image';
           final Set<String> seenSenders = {};
 
           if (snapshot.hasData && snapshot.data!.docs.isNotEmpty) {
             for (final doc in snapshot.data!.docs) {
-              final data = doc.data() as Map<String, dynamic>;
-              final senderId = data['senderId'] as String? ?? '';
-              final senderName = data['senderName'] as String? ?? 'Unknown';
-
-              if (senderId == kOwnJid) {
-                myLatestStoryUrl ??= data['url'] as String?;
-              } else {
-                if (!seenSenders.contains(senderId)) {
-                  seenSenders.add(senderId);
-                  otherStories.add(data);
-                }
-              }
+               final data = doc.data() as Map<String, dynamic>;
+               final senderId = data['senderId'] as String? ?? '';
+               
+               if (senderId == kOwnJid) {
+                 if (myLatestStoryUrl == null) {
+                   myLatestStoryUrl = data['url'] as String?;
+                   myLatestStoryType = data['type'] as String? ?? 'image';
+                 }
+               } else {
+                 if (!seenSenders.contains(senderId)) {
+                   seenSenders.add(senderId);
+                   otherStories.add(data);
+                 }
+               }
             }
           }
 
@@ -120,6 +162,7 @@ class StatusScreen extends StatelessWidget {
                 child: _StatusRingStrip(
                   storyUsers: otherStories,
                   myLatestStoryUrl: myLatestStoryUrl,
+                  myLatestStoryType: myLatestStoryType,
                 ),
               ),
               // Divider
@@ -153,8 +196,13 @@ class StatusScreen extends StatelessWidget {
 class _StatusRingStrip extends StatelessWidget {
   final List<Map<String, dynamic>> storyUsers;
   final String? myLatestStoryUrl;
+  final String myLatestStoryType;
 
-  const _StatusRingStrip({required this.storyUsers, this.myLatestStoryUrl});
+  const _StatusRingStrip({
+    required this.storyUsers,
+    this.myLatestStoryUrl,
+    this.myLatestStoryType = 'image',
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -176,6 +224,7 @@ class _StatusRingStrip extends StatelessWidget {
                       builder: (_) => StatusViewScreen(
                         url: myLatestStoryUrl!,
                         senderName: 'My Status',
+                        type: myLatestStoryType,
                       ),
                     ),
                   );
@@ -200,13 +249,18 @@ class _StatusRingStrip extends StatelessWidget {
 
           return GestureDetector(
             onTap: () {
-              if (data['url'] != null && data['url'].toString().isNotEmpty) {
+              final storyType = data['type'] as String? ?? 'image';
+              final storyUrl = data['url'] as String? ?? '';
+              // Allow text stories through (url may be empty for text type)
+              if (storyUrl.isNotEmpty || storyType == 'text') {
                 Navigator.push(
                   context,
                   CupertinoPageRoute(
                     builder: (_) => StatusViewScreen(
-                      url: data['url'],
+                      url: storyUrl,
                       senderName: senderName,
+                      senderJid: data['senderId'] as String?,
+                      type: storyType,
                     ),
                   ),
                 );
@@ -288,14 +342,8 @@ class _StatusRingAvatar extends StatelessWidget {
                               image: NetworkImage(profileUrl!),
                               fit: BoxFit.cover,
                             )
-                          : (url != null && url!.isNotEmpty)
-                              ? DecorationImage(
-                                  image: NetworkImage(url!),
-                                  fit: BoxFit.cover,
-                                )
-                              : null,
-                      gradient: ((profileUrl == null || profileUrl!.isEmpty) &&
-                              (url == null || url!.isEmpty))
+                          : null,
+                      gradient: (profileUrl == null || profileUrl!.isEmpty)
                           ? LinearGradient(
                               colors: [
                                 CupertinoColors.systemGrey.withValues(alpha: 0.3),
@@ -304,8 +352,7 @@ class _StatusRingAvatar extends StatelessWidget {
                             )
                           : null,
                     ),
-                    child: ((profileUrl == null || profileUrl!.isEmpty) &&
-                            (url == null || url!.isEmpty))
+                    child: (profileUrl == null || profileUrl!.isEmpty)
                         ? Center(
                             child: Text(
                               letter,
@@ -396,13 +443,18 @@ class _RecentStories extends StatelessWidget {
 
         return GestureDetector(
           onTap: () {
-            if (data['url'] != null && data['url'].toString().isNotEmpty) {
+            final storyType = data['type'] as String? ?? 'image';
+            final storyUrl = data['url'] as String? ?? '';
+            // Allow text stories through (url may be empty for text type)
+            if (storyUrl.isNotEmpty || storyType == 'text') {
               Navigator.push(
                 context,
                 CupertinoPageRoute(
                   builder: (_) => StatusViewScreen(
-                    url: data['url'],
+                    url: storyUrl,
                     senderName: senderName,
+                    senderJid: data['senderId'] as String?,
+                    type: storyType,
                   ),
                 ),
               );
@@ -411,8 +463,9 @@ class _RecentStories extends StatelessWidget {
           child: Container(
             padding:
                 const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: const BoxDecoration(
-              border: Border(
+            decoration: BoxDecoration(
+              color: CupertinoColors.systemBackground.resolveFrom(context),
+              border: const Border(
                 bottom: BorderSide(
                     color: CupertinoColors.separator, width: 0.5),
               ),

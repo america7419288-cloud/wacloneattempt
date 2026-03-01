@@ -2,11 +2,13 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:video_player/video_player.dart';
 
 class StatusViewScreen extends StatefulWidget {
   final String url;
   final String senderName;
   final String? senderJid;
+  final String type; // 'image', 'video', or 'text'
   final VoidCallback? onFinished;
 
   const StatusViewScreen({
@@ -14,6 +16,7 @@ class StatusViewScreen extends StatefulWidget {
     required this.url,
     required this.senderName,
     this.senderJid,
+    this.type = 'image', // default for backwards compat
     this.onFinished,
   });
 
@@ -27,29 +30,62 @@ class _StatusViewScreenState extends State<StatusViewScreen>
   Timer? _timer;
   bool _imageLoaded = false;
   final TextEditingController _replyController = TextEditingController();
+  final FocusNode _replyFocusNode = FocusNode();
+  VideoPlayerController? _videoCtrl;
+  bool _videoInitialized = false;
 
   @override
   void initState() {
     super.initState();
-    _progressController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 5),
-    )..addListener(() {
-        setState(() {});
+    _progressController = AnimationController(vsync: this)
+      ..addListener(() {
+        if (mounted) setState(() {});
+      })
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          widget.onFinished?.call();
+          Navigator.of(context).pop();
+        }
       });
 
-    _progressController.addStatusListener((status) {
-      if (status == AnimationStatus.completed && mounted) {
-        widget.onFinished?.call();
-        Navigator.of(context).pop();
+    _replyFocusNode.addListener(() {
+      if (!_replyFocusNode.hasFocus && mounted) {
+        _progressController.forward();
       }
     });
+
+    if (widget.type == 'video' && widget.url.isNotEmpty) {
+      _videoCtrl = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+        ..initialize().then((_) {
+          if (!mounted) return;
+          _progressController.duration = _videoCtrl!.value.duration.inSeconds > 0
+              ? _videoCtrl!.value.duration
+              : const Duration(seconds: 30); // fallback if duration unknown
+          setState(() => _videoInitialized = true);
+          _videoCtrl!.play();
+          _videoCtrl!.setLooping(false);
+          _progressController.forward();
+          _imageLoaded = true;
+        });
+    } else if (widget.type != 'video') {
+      // For image/text, set 5 second default
+      _progressController.duration = const Duration(seconds: 5);
+      // Image stories start the timer in loadingBuilder, text starts immediately
+      if (widget.type == 'text') {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _progressController.forward();
+          _imageLoaded = true;
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
     _progressController.dispose();
     _replyController.dispose();
+    _replyFocusNode.dispose();
+    _videoCtrl?.dispose();
     _timer?.cancel();
     super.dispose();
   }
@@ -94,33 +130,55 @@ class _StatusViewScreenState extends State<StatusViewScreen>
             children: [
               // Main Image
               Center(
-                child: Image.network(
-                  widget.url,
-                  fit: BoxFit.contain,
-                  loadingBuilder: (context, child, loadingProgress) {
-                    if (loadingProgress == null) {
-                      if (!_imageLoaded) {
-                        _imageLoaded = true;
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          if (mounted) _progressController.forward();
-                        });
-                      }
-                      return child;
-                    }
-                    return const Center(
-                      child: CupertinoActivityIndicator(
-                        color: CupertinoColors.white,
+                child: widget.type == 'video'
+                  ? (_videoInitialized && _videoCtrl != null
+                      ? AspectRatio(
+                          aspectRatio: _videoCtrl!.value.aspectRatio,
+                          child: VideoPlayer(_videoCtrl!),
+                        )
+                      : const CupertinoActivityIndicator(color: CupertinoColors.white))
+                  : widget.type == 'text'
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(32),
+                          child: Text(
+                            widget.url.isEmpty ? widget.senderName : widget.url,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: CupertinoColors.white,
+                              fontSize: 24,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      )
+                    : Image.network(
+                        widget.url,
+                        fit: BoxFit.contain,
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) {
+                            if (!_imageLoaded) {
+                              _imageLoaded = true;
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted) _progressController.forward();
+                              });
+                            }
+                            return child;
+                          }
+                          return const Center(
+                            child: CupertinoActivityIndicator(
+                              color: CupertinoColors.white,
+                            ),
+                          );
+                        },
+                        errorBuilder: (context, error, stackTrace) => const Center(
+                          child: Icon(
+                            CupertinoIcons.exclamationmark_triangle,
+                            color: CupertinoColors.systemRed,
+                            size: 40,
+                          ),
+                        ),
                       ),
-                    );
-                  },
-                  errorBuilder: (context, error, stackTrace) => const Center(
-                    child: Icon(
-                      CupertinoIcons.exclamationmark_triangle,
-                      color: CupertinoColors.systemRed,
-                      size: 40,
-                    ),
-                  ),
-                ),
               ),
               
               // Top Bar (Progress & User Info)
@@ -227,6 +285,7 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                           ),
                           child: CupertinoTextField(
                             controller: _replyController,
+                            focusNode: _replyFocusNode,
                             placeholder: 'Reply to ${widget.senderName}...',
                             placeholderStyle: TextStyle(
                               color: CupertinoColors.white.withValues(alpha: 0.5),
@@ -238,7 +297,6 @@ class _StatusViewScreenState extends State<StatusViewScreen>
                             ),
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                             decoration: null,
-                            onTap: () => _progressController.stop(),
                           ),
                         ),
                       ),

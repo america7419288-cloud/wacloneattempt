@@ -64,10 +64,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                   padding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemGrey6,
+                    color: CupertinoColors.systemBackground.resolveFrom(context),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: CupertinoColors.systemGrey4,
+                      color: CupertinoColors.separator.resolveFrom(context),
                       width: 0.5,
                     ),
                   ),
@@ -85,10 +85,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                           Expanded(
                             child: Text(
                               'Restoring history… $processed / $total messages',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w500,
-                                color: CupertinoColors.label,
+                                color: CupertinoColors.label.resolveFrom(context),
                               ),
                             ),
                           ),
