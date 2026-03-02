@@ -74,6 +74,39 @@ flutter:
 
   assets:
     - assets/wallpapers/
+    - assets/Images.xcassets/Chat/Input/Text/IconAttachment.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/IconVideo.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/AccessoryIconStickers.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/AccessoryIconKeyboard.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/SendIcon.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/AccessoryIconReaction.imageset/
+    - assets/Images.xcassets/Chat/Input/Text/AudioRecordingCancelArrow.imageset/
+    - assets/Images.xcassets/Chat/Input/Accessory Panels/ReplyIcon.imageset/
+    - assets/Images.xcassets/Chat/Input/Accessory Panels/ForwardIcon.imageset/
+    - assets/Images.xcassets/Chat/Input/Accessory Panels/EditIcon.imageset/
+    - assets/Images.xcassets/Chat/Input/Accessory Panels/MessageSelectionTrash.imageset/
+    - assets/Images.xcassets/Chat/Input/Accessory Panels/EncircledCloseButton.imageset/
+    - assets/Images.xcassets/Chat/Input/Media/EntityInputEmojiIcon.imageset/
+    - assets/Images.xcassets/Chat/Input/Media/EntityInputStickersIcon.imageset/
+    - assets/Images.xcassets/Navigation/BackArrow.imageset/
+    - assets/Images.xcassets/Navigation/Back.imageset/
+    - assets/Images.xcassets/Navigation/Close.imageset/
+    - assets/Images.xcassets/Navigation/Done.imageset/
+    - assets/Images.xcassets/Navigation/Search.imageset/
+    - assets/Images.xcassets/Navigation/Info.imageset/
+    - assets/Images.xcassets/Chat List/Tabs/IconChats.imageset/
+    - assets/Images.xcassets/Chat List/Tabs/IconCalls.imageset/
+    - assets/Images.xcassets/Chat List/Tabs/IconContacts.imageset/
+    - assets/Images.xcassets/Chat List/Tabs/IconSettings.imageset/
+    - assets/Images.xcassets/Chat List/Tabs/IconCamera.imageset/
+    - assets/Images.xcassets/Chat List/ComposeIcon.imageset/
+    - assets/Images.xcassets/Chat List/PeerPinnedIcon.imageset/
+    - assets/Images.xcassets/Chat List/PeerMutedIcon.imageset/
+    - assets/Images.xcassets/Chat/Message/Pinned.imageset/
+    - assets/Images.xcassets/Chat/Message/ShareIcon.imageset/
+    - assets/Images.xcassets/Chat/Message/NavigateToMessageIcon.imageset/
+    - assets/Images.xcassets/Chat/NavigateToMentions.imageset/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

@@ -544,26 +544,13 @@ class _PressableTileState extends State<_PressableTile> {
         setState(() => _pressed = false);
         // Issue 12d: Custom slide transition for page navigation
         Navigator.of(context).push(
-          PageRouteBuilder(
-            pageBuilder: (_, animation, __) => ChatDetailScreen(
+          TelegramPageRoute(
+            builder: (_) => ChatDetailScreen(
               contactJid: widget.jid,
               contactName: widget.name,
               avatarLetter: widget.avatarLetter,
               profileUrl: widget.profileUrl,
             ),
-            transitionsBuilder: (_, animation, __, child) {
-              return SlideTransition(
-                position: Tween<Offset>(
-                  begin: const Offset(1.0, 0.0),
-                  end: Offset.zero,
-                ).animate(CurvedAnimation(
-                  parent: animation,
-                  curve: Curves.easeOutCubic,
-                )),
-                child: child,
-              );
-            },
-            transitionDuration: const Duration(milliseconds: 320),
           ),
         );
       },
@@ -701,9 +688,10 @@ class _PressableTileState extends State<_PressableTile> {
                       ],
                       if (widget.isPinned) ...[
                         const SizedBox(height: 4),
-                        const Icon(
-                          CupertinoIcons.pin_fill,
-                          size: 12,
+                        Image.asset(
+                          'assets/Images.xcassets/Chat List/PeerPinnedIcon.imageset/ic_chatslistpin@3x.png',
+                          width: 12,
+                          height: 12,
                           color: CupertinoColors.systemGrey,
                         ),
                       ],

@@ -11,6 +11,7 @@ import 'package:photo_view/photo_view.dart';
 import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:flutter/material.dart' show Material;
 import 'contact_info_screen.dart';
 import '../chat_wallpaper_widget.dart';
@@ -94,16 +95,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       'timestamp': FieldValue.serverTimestamp(),
     });
 
-    _scrollController.addListener(() {
-      final show = _scrollController.offset > 300;
-      if (show != _showScrollToBottom) {
-        setState(() {
-          _showScrollToBottom = show;
-          // FIX: clear badge when user scrolls back to newest messages
-          if (!show) _unreadCount = 0;
-        });
-      }
-    });
+    // Scroll-to-bottom tracking is now via NotificationListener (not per-pixel addListener)
 
     _textController.addListener(_onTextChanged);
   }
@@ -836,8 +828,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.75),
             border: Border(
               bottom: BorderSide(
-                color: CupertinoColors.separator.resolveFrom(context).withValues(alpha: 0.4),
-                width: 1.0,
+                color: CupertinoColors.separator.resolveFrom(context),
+                width: 0.33,
               ),
             ),
           ),
@@ -850,8 +842,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Icon(CupertinoIcons.back, color: CupertinoColors.systemBlue, size: 28),
-                    const SizedBox(width: 2),
+                    // Telegram-exact back arrow from SVG asset
+                    SvgPicture.asset(
+                      'assets/Images.xcassets/Navigation/BackArrow.imageset/BackArrow.svg',
+                      width: 13,
+                      height: 22,
+                      colorFilter: ColorFilter.mode(
+                        CupertinoColors.systemBlue.resolveFrom(context),
+                        BlendMode.srcIn,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
                     const Text(
                       'Chats',
                       style: TextStyle(
@@ -913,8 +914,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w700,
                                 height: 1.15,
                                 color: CupertinoColors.label,
                                 letterSpacing: -0.4,
@@ -1217,96 +1218,120 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           );
         }
 
-        return ListView.builder(
-          controller: _scrollController,
-          reverse: true,
-          // FIX: Dismisses keyboard when user drags the message list (iOS-native behavior)
-          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-          padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
-          itemCount: docs.length,
-          itemBuilder: (context, index) {
-            final data = docs[index].data() as Map<String, dynamic>;
-            final isOutgoing = data['isMe'] == true;
-            final timestamp = data['timestamp'] as Timestamp?;
-
-            // Format time — always HH:MM inside a conversation.
-            // "Yesterday" / weekday labels belong in the chat list, not the bubble.
-            // The date chip already tells the user which day the message is from.
-            String timeStr = '';
-            if (timestamp != null) {
-              final dt = timestamp.toDate();
-              timeStr =
-                  '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-            }
-
-            // Date header
-            Widget? dateHeader;
-            if (timestamp != null) {
-              final currentDate = timestamp.toDate();
-              DateTime? prevDate;
-              if (index < docs.length - 1) {
-                final prevTs = (docs[index + 1].data() as Map<String, dynamic>)['timestamp']
-                    as Timestamp?;
-                prevDate = prevTs?.toDate();
-              }
-              final showHeader = prevDate == null ||
-                  currentDate.year != prevDate.year ||
-                  currentDate.month != prevDate.month ||
-                  currentDate.day != prevDate.day;
-              if (showHeader) {
-                dateHeader = _DateChip(date: currentDate);
+        return NotificationListener<ScrollNotification>(
+          onNotification: (ScrollNotification notification) {
+            if (notification is ScrollUpdateNotification) {
+              final show = notification.metrics.pixels > 300;
+              if (show != _showScrollToBottom) {
+                setState(() {
+                  _showScrollToBottom = show;
+                  if (!show) _unreadCount = 0;
+                });
               }
             }
-
-            // Grouping: only the newest message in a cluster gets a tail.
-            // A cluster is consecutive messages from the same sender within 2 min.
-            // The list is reversed, so index 0 = newest.
-            bool isTailMessage = true; // assume tail unless proven part of cluster
-            bool isClusterMember = false; // true if same sender as adjacent msg
-
-            // Check if the NEXT message (index+1, older) is from the same sender
-            if (index < docs.length - 1) {
-              final olderData = docs[index + 1].data() as Map<String, dynamic>;
-              final olderIsOutgoing = olderData['isMe'] == true;
-              final olderTs = olderData['timestamp'] as Timestamp?;
-              if (olderIsOutgoing == isOutgoing && timestamp != null && olderTs != null) {
-                final diff = timestamp.toDate().difference(olderTs.toDate()).abs();
-                if (diff.inMinutes < 2) isClusterMember = true;
-              }
-            }
-
-            // Check if the PREV message (index-1, newer) is from the same sender
-            if (index > 0) {
-              final newerData = docs[index - 1].data() as Map<String, dynamic>;
-              final newerIsOutgoing = newerData['isMe'] == true;
-              final newerTs = newerData['timestamp'] as Timestamp?;
-              if (newerIsOutgoing == isOutgoing && timestamp != null && newerTs != null) {
-                final diff = newerTs.toDate().difference(timestamp.toDate()).abs();
-                if (diff.inMinutes < 2) isTailMessage = false; // not the newest in cluster
-              }
-            }
-
-            final docId = docs[index].id;
-            final isGroup = widget.contactJid.endsWith('@g.us');
-            final senderName = data['senderName'] as String? ?? '';
-            final isNewest = index == 0;
-
-            Widget item = _buildMessageItem(
-              context, data, docId, isOutgoing, isGroup, senderName,
-              dateHeader, timeStr, isTailMessage, isClusterMember,
-            );
-
-            // Entrance animation for newest message — spring-driven pop
-            if (isNewest) {
-              item = _SpringEntranceWidget(
-                key: ValueKey('anim_$docId'),
-                isOutgoing: isOutgoing,
-                child: item,
-              );
-            }
-
-            return item;
+            return false;
           },
+          child: ListView.builder(
+            controller: _scrollController,
+            reverse: true,
+            cacheExtent: 500.0,
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+            itemCount: docs.length,
+            itemBuilder: (context, index) {
+              final data = docs[index].data() as Map<String, dynamic>;
+              final isOutgoing = data['isMe'] == true;
+              final timestamp = data['timestamp'] as Timestamp?;
+
+              // Format time
+              String timeStr = '';
+              if (timestamp != null) {
+                final dt = timestamp.toDate();
+                timeStr =
+                    '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+              }
+
+              // Date header
+              Widget? dateHeader;
+              if (timestamp != null) {
+                final currentDate = timestamp.toDate();
+                DateTime? prevDate;
+                if (index < docs.length - 1) {
+                  final prevTs = (docs[index + 1].data() as Map<String, dynamic>)['timestamp']
+                      as Timestamp?;
+                  prevDate = prevTs?.toDate();
+                }
+                final showHeader = prevDate == null ||
+                    currentDate.year != prevDate.year ||
+                    currentDate.month != prevDate.month ||
+                    currentDate.day != prevDate.day;
+                if (showHeader) {
+                  dateHeader = _DateChip(date: currentDate);
+                }
+              }
+
+              // Grouping: only the newest message in a cluster gets a tail.
+              bool isTailMessage = true;
+              bool isClusterMember = false;
+
+              if (index < docs.length - 1) {
+                final olderData = docs[index + 1].data() as Map<String, dynamic>;
+                final olderIsOutgoing = olderData['isMe'] == true;
+                final olderTs = olderData['timestamp'] as Timestamp?;
+                if (olderIsOutgoing == isOutgoing && timestamp != null && olderTs != null) {
+                  final diff = timestamp.toDate().difference(olderTs.toDate()).abs();
+                  if (diff.inMinutes < 2) isClusterMember = true;
+                }
+              }
+
+              if (index > 0) {
+                final newerData = docs[index - 1].data() as Map<String, dynamic>;
+                final newerIsOutgoing = newerData['isMe'] == true;
+                final newerTs = newerData['timestamp'] as Timestamp?;
+                if (newerIsOutgoing == isOutgoing && timestamp != null && newerTs != null) {
+                  final diff = newerTs.toDate().difference(timestamp.toDate()).abs();
+                  if (diff.inMinutes < 2) isTailMessage = false;
+                }
+              }
+
+              final docId = docs[index].id;
+              final isGroup = widget.contactJid.endsWith('@g.us');
+              final senderName = data['senderName'] as String? ?? '';
+              final isNewest = index == 0;
+
+              Widget item = _buildMessageItem(
+                context, data, docId, isOutgoing, isGroup, senderName,
+                dateHeader, timeStr, isTailMessage, isClusterMember,
+              );
+
+              // Entrance animation — spring for newest, stagger for initial load
+              if (isNewest) {
+                item = _SpringEntranceWidget(
+                  key: ValueKey('anim_$docId'),
+                  isOutgoing: isOutgoing,
+                  child: item,
+                );
+              } else if (index < 8 && _prevDocCount <= 1) {
+                // Stagger initial load: first 8 messages cascade in
+                item = TweenAnimationBuilder<double>(
+                  key: ValueKey('stagger_$docId'),
+                  tween: Tween(begin: 0.0, end: 1.0),
+                  duration: Duration(milliseconds: 350 + (index * 40)),
+                  curve: Curves.easeOutCubic,
+                  builder: (_, v, child) => Opacity(
+                    opacity: v.clamp(0.0, 1.0),
+                    child: Transform.scale(
+                      scale: 0.9 + (0.1 * v),
+                      child: child,
+                    ),
+                  ),
+                  child: item,
+                );
+              }
+
+              return item;
+            },
+          ),
         );
       },
     );
@@ -1458,7 +1483,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             children: [
               // Attach button
               _InputIconButton(
-                icon: CupertinoIcons.plus,
+                assetPath: 'assets/Images.xcassets/Chat/Input/Text/IconAttachment.imageset/ModernConversationAttach@3x.png',
                 onTap: _pickAndSendMedia,
               ),
               const SizedBox(width: 4),
@@ -1513,9 +1538,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               ),
                             ),
                           ),
-                          child: Icon(
-                            CupertinoIcons.smiley,
-                            size: 22,
+                          child: Image.asset(
+                            'assets/Images.xcassets/Chat/Input/Text/AccessoryIconStickers.imageset/ConversationInputFieldStickerIcon@3x.png',
+                            width: 22,
+                            height: 22,
                             color: CupertinoColors.systemGrey.resolveFrom(context),
                           ),
                         ),
@@ -1540,6 +1566,122 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  TELEGRAM BACK ARROW PAINTER
+// ═══════════════════════════════════════════════
+class _TelegramBackArrowPainter extends CustomPainter {
+  final Color color;
+  const _TelegramBackArrowPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // Exact Telegram iOS SVG path, scaled to fit the widget bounds.
+    // Original viewBox: 0 0 13 23
+    final sx = size.width / 13.0;
+    final sy = size.height / 23.0;
+
+    final path = Path()
+      ..moveTo(3.60751322 * sx, 11.5 * sy)
+      ..lineTo(11.5468531 * sx, 3.56066017 * sy)
+      ..cubicTo(12.1326395 * sx, 2.97487373 * sy, 12.1326395 * sx, 2.02512627 * sy, 11.5468531 * sx, 1.43933983 * sy)
+      ..cubicTo(10.9610666 * sx, 0.853553391 * sy, 10.0113191 * sx, 0.853553391 * sy, 9.42553271 * sx, 1.43933983 * sy)
+      ..lineTo(0.449102936 * sx, 10.4157696 * sy)
+      ..cubicTo(-0.149700979 * sx, 11.0145735 * sy, -0.149700979 * sx, 11.9854265 * sy, 0.449102936 * sx, 12.5842304 * sy)
+      ..lineTo(9.42553271 * sx, 21.5606602 * sy)
+      ..cubicTo(10.0113191 * sx, 22.1464466 * sy, 10.9610666 * sx, 22.1464466 * sy, 11.5468531 * sx, 21.5606602 * sy)
+      ..cubicTo(12.1326395 * sx, 20.9748737 * sy, 12.1326395 * sx, 20.0251263 * sy, 11.5468531 * sx, 19.4393398 * sy)
+      ..lineTo(3.60751322 * sx, 11.5 * sy)
+      ..close();
+
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+
+    // Sub-pixel offset for high-DPI alignment
+    canvas.translate(0.33, 0);
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_TelegramBackArrowPainter oldDelegate) => color != oldDelegate.color;
+}
+
+// ═══════════════════════════════════════════════
+//  TELEGRAM PAGE ROUTE (edge shadow + parallax)
+// ═══════════════════════════════════════════════
+class TelegramPageRoute<T> extends CupertinoPageRoute<T> {
+  TelegramPageRoute({required super.builder, super.settings});
+
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    // Squircle corner radius during transition
+    final cornerRadius = Tween<double>(begin: 0, end: 0)
+        .animate(CurvedAnimation(parent: animation, curve: Curves.easeOut));
+
+    return AnimatedBuilder(
+      animation: animation,
+      builder: (_, __) {
+        return Stack(
+          children: [
+            // Bottom screen (parallax at 0.3 ratio)
+            if (secondaryAnimation.value > 0)
+              SlideTransition(
+                position: Tween<Offset>(
+                  begin: Offset.zero,
+                  end: const Offset(-0.3, 0),
+                ).animate(secondaryAnimation),
+                child: const SizedBox.expand(),
+              ),
+            // Edge shadow on leading side
+            SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(1.0, 0.0),
+                end: Offset.zero,
+              ).animate(CurvedAnimation(
+                parent: animation,
+                curve: Curves.easeOut,
+              )),
+              child: Stack(
+                children: [
+                  // Shadow on left edge
+                  Positioned(
+                    left: -16,
+                    top: 0,
+                    bottom: 0,
+                    width: 16,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF000000).withValues(alpha: 0.5 * animation.value),
+                            blurRadius: 16.0,
+                            offset: const Offset(0, 0),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // The actual page content
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(cornerRadius.value),
+                    child: child,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -2613,20 +2755,34 @@ class _ScrollToBottomButton extends StatelessWidget {
             Positioned(
               top: -4,
               right: -2,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                decoration: BoxDecoration(
-                  color: CupertinoColors.systemBlue,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  unreadCount > 99 ? '99+' : '$unreadCount',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: CupertinoColors.white,
-                  ),
-                ),
+              child: Builder(
+                builder: (context) {
+                  final text = unreadCount > 99 ? '99+' : '$unreadCount';
+                  final isWide = text.length >= 2;
+                  return Container(
+                    constraints: BoxConstraints(
+                      minWidth: isWide ? 18.0 + 10.0 : 18.0,
+                      minHeight: 18.0,
+                    ),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isWide ? 5 : 0,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemBlue,
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      text,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: CupertinoColors.white,
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
         ],
@@ -2673,9 +2829,9 @@ class _PinnedProgressBar extends StatelessWidget {
 //  INPUT ICON BUTTON
 // ─────────────────────────────────────────────
 class _InputIconButton extends StatefulWidget {
-  final IconData icon;
+  final String assetPath;
   final VoidCallback onTap;
-  const _InputIconButton({required this.icon, required this.onTap});
+  const _InputIconButton({required this.assetPath, required this.onTap});
   @override
   State<_InputIconButton> createState() => _InputIconButtonState();
 }
@@ -2699,7 +2855,14 @@ class _InputIconButtonState extends State<_InputIconButton> {
             color: CupertinoColors.systemGrey5.resolveFrom(context),
             shape: BoxShape.circle,
           ),
-          child: Icon(widget.icon, size: 20, color: CupertinoColors.systemGrey.resolveFrom(context)),
+          child: Center(
+            child: Image.asset(
+              widget.assetPath,
+              width: 20,
+              height: 20,
+              color: CupertinoColors.systemGrey.resolveFrom(context),
+            ),
+          ),
         ),
       ),
     );
@@ -2756,7 +2919,14 @@ class _MicButton extends StatelessWidget {
         color: CupertinoColors.systemBlue,
         shape: BoxShape.circle,
       ),
-      child: const Icon(CupertinoIcons.mic, color: CupertinoColors.white, size: 20),
+      child: Center(
+        child: Image.asset(
+          'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
+          width: 20,
+          height: 20,
+          color: CupertinoColors.white,
+        ),
+      ),
     );
   }
 }
