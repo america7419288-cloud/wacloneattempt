@@ -833,11 +833,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           padding: EdgeInsets.only(top: topPad),
           height: 56 + topPad,
           decoration: BoxDecoration(
-            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.85),
+            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.75),
             border: Border(
               bottom: BorderSide(
-                color: CupertinoColors.separator.resolveFrom(context),
-                width: 0.33,
+                color: CupertinoColors.separator.resolveFrom(context).withValues(alpha: 0.4),
+                width: 1.0,
               ),
             ),
           ),
@@ -1296,24 +1296,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               dateHeader, timeStr, isTailMessage, isClusterMember,
             );
 
-            // Entrance animation for newest message only (staggered scale + fade)
+            // Entrance animation for newest message — spring-driven pop
             if (isNewest) {
-              item = TweenAnimationBuilder<double>(
+              item = _SpringEntranceWidget(
                 key: ValueKey('anim_$docId'),
-                tween: Tween(begin: 0.0, end: 1.0),
-                duration: const Duration(milliseconds: 350),
-                curve: Curves.easeOutBack,
-                builder: (_, v, child) => Opacity(
-                  opacity: v.clamp(0.0, 1.0),
-                  child: Transform.scale(
-                    scale: 0.8 + (0.2 * v), // starts at 0.8, pops to 1.0
-                    alignment: isOutgoing ? Alignment.bottomRight : Alignment.bottomLeft,
-                    child: Transform.translate(
-                      offset: Offset(isOutgoing ? (1 - v) * 20 : (1 - v) * -20, 0),
-                      child: child,
-                    ),
-                  ),
-                ),
+                isOutgoing: isOutgoing,
                 child: item,
               );
             }
@@ -1553,6 +1540,61 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  SPRING ENTRANCE ANIMATION
+// ═══════════════════════════════════════════════
+class _SpringEntranceWidget extends StatefulWidget {
+  final bool isOutgoing;
+  final Widget child;
+  const _SpringEntranceWidget({super.key, required this.isOutgoing, required this.child});
+
+  @override
+  State<_SpringEntranceWidget> createState() => _SpringEntranceWidgetState();
+}
+
+class _SpringEntranceWidgetState extends State<_SpringEntranceWidget>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 600));
+    // Drive with a spring: starts at 0 (fully hidden), settles at 1 (fully visible)
+    final spring = SpringDescription(mass: 1, stiffness: 500, damping: 25);
+    final sim = SpringSimulation(spring, 0, 1, 0);
+    _ctrl.animateWith(sim);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, child) {
+        final v = _ctrl.value.clamp(0.0, 1.0);
+        return Opacity(
+          opacity: v,
+          child: Transform.scale(
+            scale: 0.8 + (0.2 * v),
+            alignment: widget.isOutgoing ? Alignment.bottomRight : Alignment.bottomLeft,
+            child: Transform.translate(
+              offset: Offset(widget.isOutgoing ? (1 - v) * 20 : (1 - v) * -20, 0),
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: widget.child,
     );
   }
 }
@@ -1821,7 +1863,8 @@ class _ChatBubble extends StatelessWidget {
                                 senderName,
                                 style: TextStyle(
                                   fontSize: 13,
-                                  fontWeight: FontWeight.w700,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: -0.4,
                                   color: senderColor,
                                 ),
                               ),
@@ -2793,7 +2836,7 @@ class _TextContent extends StatelessWidget {
           text,
           style: TextStyle(
             fontSize: 16,
-            height: 1.35,
+            height: 1.2,
             letterSpacing: -0.2,
             color: isOutgoing
                 ? _outgoingTextColor(context)
