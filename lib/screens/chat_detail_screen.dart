@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 import 'dart:math' as math;
+import 'package:flutter/physics.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
@@ -775,48 +776,45 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       backgroundColor: CupertinoColors.systemBackground.resolveFrom(context),
       child: Stack(
         children: [
-          // ── Wallpaper ──
+          // ── Wallpaper (edge-to-edge) ──
           const Positioned.fill(child: ChatWallpaperBackground()),
 
-          // ── Content ──
-          SafeArea(
-            bottom: false,
-            child: Column(
-              children: [
-                // ── Custom Nav Bar ──
-                _buildNavBar(context),
-                // ── Pinned message banner ──
-                _buildPinnedBanner(),
-                // ── Messages ──
-                Expanded(
-                  child: Stack(
-                    children: [
-                      _buildMessageList(),
-                      // Scroll to bottom button
-                      if (_showScrollToBottom)
-                        Positioned(
-                          bottom: 12,
-                          right: 12,
-                          child: _ScrollToBottomButton(
-                            unreadCount: _unreadCount,
-                            onTap: () {
-                              _scrollController.animateTo(
-                                0,
-                                duration: const Duration(milliseconds: 350),
-                                curve: Curves.easeOutCubic,
-                              );
-                              // FIX: reset badge when user taps the button
-                              setState(() => _unreadCount = 0);
-                            },
-                          ),
+          // ── Content (no SafeArea — nav bar handles top inset) ──
+          Column(
+            children: [
+              // ── Custom Nav Bar ──
+              _buildNavBar(context),
+              // ── Pinned message banner ──
+              _buildPinnedBanner(),
+              // ── Messages ──
+              Expanded(
+                child: Stack(
+                  children: [
+                    _buildMessageList(),
+                    // Scroll to bottom button
+                    if (_showScrollToBottom)
+                      Positioned(
+                        bottom: 12,
+                        right: 12,
+                        child: _ScrollToBottomButton(
+                          unreadCount: _unreadCount,
+                          onTap: () {
+                            _scrollController.animateTo(
+                              0,
+                              duration: const Duration(milliseconds: 350),
+                              curve: Curves.easeOutCubic,
+                            );
+                            // FIX: reset badge when user taps the button
+                            setState(() => _unreadCount = 0);
+                          },
                         ),
-                    ],
-                  ),
+                      ),
+                  ],
                 ),
-                // ── Bottom bar (blur + typing + input) ──
-                _buildBottomBar(),
-              ],
-            ),
+              ),
+              // ── Bottom bar (blur + typing + input) ──
+              _buildBottomBar(),
+            ],
           ),
         ],
       ),
@@ -827,11 +825,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  NAV BAR  (Telegram-style)
   // ─────────────────────────────────────────────
   Widget _buildNavBar(BuildContext context) {
+    final topPad = MediaQuery.of(context).padding.top;
     return ClipRect(
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
         child: Container(
-          height: 56,
+          padding: EdgeInsets.only(top: topPad),
+          height: 56 + topPad,
           decoration: BoxDecoration(
             color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.85),
             border: Border(
@@ -915,10 +915,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               style: const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
+                                height: 1.15,
                                 color: CupertinoColors.label,
-                                letterSpacing: -0.3,
+                                letterSpacing: -0.4,
                               ),
                             ),
+                            const SizedBox(height: 1),
                             _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
                           ],
                         ),
@@ -1256,15 +1258,31 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               }
             }
 
-            // Grouping: is the next message from the same sender within 2 min?
-            bool isTailMessage = true;
+            // Grouping: only the newest message in a cluster gets a tail.
+            // A cluster is consecutive messages from the same sender within 2 min.
+            // The list is reversed, so index 0 = newest.
+            bool isTailMessage = true; // assume tail unless proven part of cluster
+            bool isClusterMember = false; // true if same sender as adjacent msg
+
+            // Check if the NEXT message (index+1, older) is from the same sender
+            if (index < docs.length - 1) {
+              final olderData = docs[index + 1].data() as Map<String, dynamic>;
+              final olderIsOutgoing = olderData['isMe'] == true;
+              final olderTs = olderData['timestamp'] as Timestamp?;
+              if (olderIsOutgoing == isOutgoing && timestamp != null && olderTs != null) {
+                final diff = timestamp.toDate().difference(olderTs.toDate()).abs();
+                if (diff.inMinutes < 2) isClusterMember = true;
+              }
+            }
+
+            // Check if the PREV message (index-1, newer) is from the same sender
             if (index > 0) {
-              final prevData = docs[index - 1].data() as Map<String, dynamic>;
-              final prevIsOutgoing = prevData['isMe'] == true;
-              final prevTs = prevData['timestamp'] as Timestamp?;
-              if (prevIsOutgoing == isOutgoing && timestamp != null && prevTs != null) {
-                final diff = prevTs.toDate().difference(timestamp.toDate()).abs();
-                if (diff.inMinutes < 2) isTailMessage = false;
+              final newerData = docs[index - 1].data() as Map<String, dynamic>;
+              final newerIsOutgoing = newerData['isMe'] == true;
+              final newerTs = newerData['timestamp'] as Timestamp?;
+              if (newerIsOutgoing == isOutgoing && timestamp != null && newerTs != null) {
+                final diff = newerTs.toDate().difference(timestamp.toDate()).abs();
+                if (diff.inMinutes < 2) isTailMessage = false; // not the newest in cluster
               }
             }
 
@@ -1275,21 +1293,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
             Widget item = _buildMessageItem(
               context, data, docId, isOutgoing, isGroup, senderName,
-              dateHeader, timeStr, isTailMessage,
+              dateHeader, timeStr, isTailMessage, isClusterMember,
             );
 
-            // Entrance animation for newest message only
+            // Entrance animation for newest message only (staggered scale + fade)
             if (isNewest) {
               item = TweenAnimationBuilder<double>(
                 key: ValueKey('anim_$docId'),
                 tween: Tween(begin: 0.0, end: 1.0),
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
+                duration: const Duration(milliseconds: 350),
+                curve: Curves.easeOutBack,
                 builder: (_, v, child) => Opacity(
-                  opacity: v,
-                  child: Transform.translate(
-                    offset: Offset(isOutgoing ? (1 - v) * 20 : (1 - v) * -20, 0),
-                    child: child,
+                  opacity: v.clamp(0.0, 1.0),
+                  child: Transform.scale(
+                    scale: 0.8 + (0.2 * v), // starts at 0.8, pops to 1.0
+                    alignment: isOutgoing ? Alignment.bottomRight : Alignment.bottomLeft,
+                    child: Transform.translate(
+                      offset: Offset(isOutgoing ? (1 - v) * 20 : (1 - v) * -20, 0),
+                      child: child,
+                    ),
                   ),
                 ),
                 child: item,
@@ -1313,6 +1335,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     Widget? dateHeader,
     String timeStr,
     bool isTailMessage,
+    bool isClusterMember,
   ) {
     return Column(
       children: [
@@ -1326,6 +1349,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           senderColor: senderName.isNotEmpty ? _senderColor(senderName) : CupertinoColors.systemBlue,
           docId: docId,
           isTailMessage: isTailMessage,
+          isClusterMember: isClusterMember,
           onReply: _setReply,
           onLongPress: (tapPosition) => _showContextMenu(context, data, docId, tapPosition),
         ),
@@ -1339,7 +1363,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Widget _buildBottomBar() {
     return ClipRect(
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+        filter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
         child: Container(
           decoration: BoxDecoration(
             color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.94),
@@ -1447,7 +1471,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             children: [
               // Attach button
               _InputIconButton(
-                icon: CupertinoIcons.paperclip,
+                icon: CupertinoIcons.plus,
                 onTap: _pickAndSendMedia,
               ),
               const SizedBox(width: 4),
@@ -1545,6 +1569,7 @@ class _SwipableBubbleRow extends StatefulWidget {
   final Color senderColor;
   final String docId;
   final bool isTailMessage;
+  final bool isClusterMember;
   final void Function(Map<String, dynamic>) onReply;
   final void Function(Offset tapPosition) onLongPress;
 
@@ -1557,6 +1582,7 @@ class _SwipableBubbleRow extends StatefulWidget {
     required this.senderColor,
     required this.docId,
     required this.isTailMessage,
+    this.isClusterMember = false,
     required this.onReply,
     required this.onLongPress,
   });
@@ -1568,9 +1594,9 @@ class _SwipableBubbleRow extends StatefulWidget {
 class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
     with SingleTickerProviderStateMixin {
   late AnimationController _swipeAnim;
-  late Animation<double> _swipeOffset;
   bool _didTriggerHaptic = false;
   double _dragOffset = 0;
+  double _animStart = 0;
   Offset _lastTapPosition = Offset.zero;
 
   @override
@@ -1578,10 +1604,7 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
     super.initState();
     _swipeAnim = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 350),
-    );
-    _swipeOffset = Tween<double>(begin: 0, end: 0).animate(
-      CurvedAnimation(parent: _swipeAnim, curve: Curves.elasticOut),
+      duration: const Duration(milliseconds: 600),
     );
   }
 
@@ -1591,11 +1614,21 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
     super.dispose();
   }
 
-  void _springBack() {
-    _swipeOffset = Tween<double>(begin: _dragOffset, end: 0).animate(
-      CurvedAnimation(parent: _swipeAnim, curve: Curves.elasticOut),
+  void _springBack(double velocity) {
+    // 1. Define the spring: frequency and damping.
+    // damping: 1.0 is critically damped, < 1.0 has a bit of "bounce".
+    final spring = SpringDescription(
+      mass: 1,
+      stiffness: 600, // Higher = snappier
+      damping: 28,    // Higher = less oscillation
     );
-    _swipeAnim.forward(from: 0);
+    
+    // 2. Create the simulation starting from current offset to 0
+    final simulation = SpringSimulation(spring, _dragOffset, 0, velocity);
+    
+    // 3. Drive the animation using the simulation
+    _swipeAnim.animateWith(simulation);
+    
     _dragOffset = 0;
     _didTriggerHaptic = false;
   }
@@ -1620,20 +1653,21 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
             _dragOffset = (_dragOffset + delta).clamp(0.0, 72.0);
             if (_dragOffset > 44 && !_didTriggerHaptic) {
               _didTriggerHaptic = true;
-              HapticFeedback.mediumImpact();
+              HapticFeedback.lightImpact();
             } else if (_dragOffset <= 44) {
               _didTriggerHaptic = false;
             }
           });
         }
       },
-      onHorizontalDragEnd: (_) {
+      onHorizontalDragEnd: (details) {
         if (_dragOffset > 44) widget.onReply(widget.data);
-        _springBack();
+        final velocity = widget.isOutgoing ? -details.velocity.pixelsPerSecond.dx : details.velocity.pixelsPerSecond.dx;
+        _springBack(velocity);
         setState(() {});
       },
       onHorizontalDragCancel: () {
-        _springBack();
+        _springBack(0);
         setState(() {});
       },
       child: SizedBox(
@@ -1668,8 +1702,9 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
               child: AnimatedBuilder(
                 animation: _swipeAnim,
                 builder: (_, child) {
+                  // Direct offset from animation value (driven by SpringSimulation)
                   final offset = _swipeAnim.isAnimating
-                      ? _swipeOffset.value
+                      ? _swipeAnim.value
                       : _dragOffset;
                   return Transform.translate(
                     offset: Offset(widget.isOutgoing ? -offset : offset, 0),
@@ -1685,6 +1720,7 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
                   senderColor: widget.senderColor,
                   docId: widget.docId,
                   isTailMessage: widget.isTailMessage,
+                  isClusterMember: widget.isClusterMember,
                 ),
               ),
             ),
@@ -1707,6 +1743,7 @@ class _ChatBubble extends StatelessWidget {
   final Color senderColor;
   final String docId;
   final bool isTailMessage;
+  final bool isClusterMember;
 
   const _ChatBubble({
     required this.data,
@@ -1717,6 +1754,7 @@ class _ChatBubble extends StatelessWidget {
     required this.senderColor,
     required this.docId,
     required this.isTailMessage,
+    this.isClusterMember = false,
   });
 
   @override
@@ -1728,7 +1766,8 @@ class _ChatBubble extends StatelessWidget {
     final isMediaOnly = ['image', 'video', 'audio', 'file'].contains(type) &&
         (data['text'] as String? ?? '').isEmpty;
 
-    final verticalPad = isTailMessage ? 2.0 : 6.0;
+    // Tight 2px padding within a cluster, 8px between clusters
+    final verticalPad = isClusterMember && !isTailMessage ? 1.0 : 4.0;
 
     return Padding(
       padding: EdgeInsets.only(
@@ -1798,26 +1837,55 @@ class _ChatBubble extends StatelessWidget {
                               isOutgoing: isOutgoing,
                             ),
                           ),
-                        // Content
-                        Align(
-                          alignment: AlignmentDirectional.centerStart,
-                          widthFactor: 1.0,
-                          child: _buildContent(context, type, isDeleted, isMediaOnly),
-                        ),
-                        // Time + ticks (right-aligned by Column's crossAxisAlignment)
-                        Padding(
-                          padding: isMediaOnly
-                              ? EdgeInsets.zero
-                              : const EdgeInsets.only(top: 3),
-                          child: _TimeRow(
-                            time: time,
-                            isOutgoing: isOutgoing,
-                            deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
-                            docId: docId,
-                            data: data,
-                            overlayOnMedia: isMediaOnly && type == 'image',
+                        // Content + Time — inline for text, stacked for media
+                        if (type == 'text' || type == null || (!isMediaOnly && !isDeleted))
+                          // Text messages: Wrap lets time sit inline after short text
+                          Align(
+                            alignment: AlignmentDirectional.centerStart,
+                            widthFactor: 1.0,
+                            child: Wrap(
+                              alignment: WrapAlignment.end,
+                              crossAxisAlignment: WrapCrossAlignment.end,
+                              spacing: 4,
+                              runSpacing: 0,
+                              children: [
+                                _buildContent(context, type, isDeleted, isMediaOnly),
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 1),
+                                  child: _TimeRow(
+                                    time: time,
+                                    isOutgoing: isOutgoing,
+                                    deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
+                                    docId: docId,
+                                    data: data,
+                                    overlayOnMedia: false,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else ...[
+                          // Media messages: stacked layout
+                          Align(
+                            alignment: AlignmentDirectional.centerStart,
+                            widthFactor: 1.0,
+                            child: _buildContent(context, type, isDeleted, isMediaOnly),
                           ),
-                        ),
+                          // Time + ticks (right-aligned by Column's crossAxisAlignment)
+                          Padding(
+                            padding: isMediaOnly
+                                ? EdgeInsets.zero
+                                : const EdgeInsets.only(top: 3),
+                            child: _TimeRow(
+                              time: time,
+                              isOutgoing: isOutgoing,
+                              deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
+                              docId: docId,
+                              data: data,
+                              overlayOnMedia: isMediaOnly && type == 'image',
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -1856,9 +1924,10 @@ class _ChatBubble extends StatelessWidget {
   }
 
   BorderRadius _bubbleRadius(bool isOutgoing, bool isTail) {
-    const r = Radius.circular(20);
+    const r = Radius.circular(18);
     const rSmall = Radius.circular(4);
     if (isTail) {
+      // Newest in cluster: sharp tail corner
       return BorderRadius.only(
         topLeft: r,
         topRight: r,
@@ -1866,7 +1935,8 @@ class _ChatBubble extends StatelessWidget {
         bottomRight: isOutgoing ? rSmall : r,
       );
     }
-    return const BorderRadius.all(Radius.circular(20));
+    // Non-tail (older in cluster): uniform 18px on all sides
+    return const BorderRadius.all(r);
   }
 
   EdgeInsets _bubblePadding(String? type, bool isMediaOnly) {
@@ -2724,7 +2794,7 @@ class _TextContent extends StatelessWidget {
           style: TextStyle(
             fontSize: 16,
             height: 1.35,
-            letterSpacing: -0.1,
+            letterSpacing: -0.2,
             color: isOutgoing
                 ? _outgoingTextColor(context)
                 : CupertinoColors.label.resolveFrom(context),
