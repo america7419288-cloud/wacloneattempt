@@ -211,7 +211,21 @@ async function startWhatsApp() {
                 }
 
                 const isMe = msg.key.fromMe || false;
-                const senderName = msg.pushName || jid.split('@')[0];
+                // Issue 5: Check address_book for saved contact name before falling back
+                let senderName = msg.pushName || jid.split('@')[0];
+                try {
+                    const phone = jid.split('@')[0];
+                    const abDoc = await db.collection('address_book').doc(phone).get();
+                    if (!abDoc.exists) {
+                        const shortPhone = phone.slice(-10);
+                        const shortSnap = await db.collection('address_book').where('phone', '==', shortPhone).limit(1).get();
+                        if (!shortSnap.empty) {
+                            senderName = shortSnap.docs[0].data().name || senderName;
+                        }
+                    } else {
+                        senderName = abDoc.data().name || senderName;
+                    }
+                } catch (e) { /* skip */ }
                 const msgTimestamp = msg.messageTimestamp
                     ? new Date(typeof msg.messageTimestamp === 'number'
                         ? msg.messageTimestamp * 1000
@@ -388,6 +402,8 @@ async function startWhatsApp() {
             unsubscribers.push(listenToStoryOutbox(sock));
             unsubscribers.push(listenToCommands(sock));
             unsubscribers.push(listenToReactionOutbox(sock));
+            // Issue 14: Register pin outbox listener
+            unsubscribers.push(listenToPinOutbox(sock));
         }
     });
 
@@ -420,6 +436,18 @@ async function startWhatsApp() {
             let senderName = contactDoc.exists
                 ? (contactDoc.data().name || msg.pushName || jid.split('@')[0])
                 : (msg.pushName || jid.split('@')[0]);
+
+            // Issue 5: Address_book fallback when name looks like a phone number
+            if (/^\d+$/.test(senderName)) {
+                try {
+                    const phone = jid.split('@')[0];
+                    const abDoc = await db.collection('address_book').doc(phone).get();
+                    if (abDoc.exists && abDoc.data().name) {
+                        senderName = abDoc.data().name;
+                        await db.collection('contacts').doc(jid).set({ name: senderName }, { merge: true });
+                    }
+                } catch (e) { /* skip */ }
+            }
 
             // --- FETCH PROFILE PICTURE ---
             let profilePic = savedPic;
@@ -648,7 +676,7 @@ async function startWhatsApp() {
         }, { merge: true });
     });
 
-    // 4d. MESSAGE DELETION (delete for everyone)
+    // 4d. MESSAGE DELETION (delete for everyone) + Issue 14: PIN EVENTS
     sock.ev.on('messages.update', async (updates) => {
         for (const update of updates) {
             if (update.update?.message === null || update.update?.messageStubType === 1) {
@@ -657,6 +685,21 @@ async function startWhatsApp() {
                 const snap = await db.collection('messages').where('msgKeyId', '==', msgKeyId).limit(1).get();
                 if (!snap.empty) {
                     await snap.docs[0].ref.update({ deleted: true, text: 'This message was deleted' });
+                }
+            }
+            // Issue 14: Handle incoming pin events from WhatsApp
+            if (update.update?.pinInChat) {
+                const pin = update.update.pinInChat;
+                const msgKeyId = update.key?.id;
+                if (msgKeyId) {
+                    const snap = await db.collection('messages')
+                        .where('msgKeyId', '==', msgKeyId).limit(1).get();
+                    if (!snap.empty) {
+                        await snap.docs[0].ref.update({
+                            isPinned: pin.type !== 0,
+                            pinnedAt: pin.type !== 0 ? admin.firestore.FieldValue.serverTimestamp() : null,
+                        });
+                    }
                 }
             }
         }
@@ -698,6 +741,17 @@ function listenToAddressBook(sock) {
                             avatarLetter: (name && name.length > 0) ? name.charAt(0).toUpperCase() : '?',
                             timestamp: admin.firestore.FieldValue.serverTimestamp()
                         }, { merge: true });
+
+                        // Issue 7: Fetch bio/status for the contact
+                        try {
+                            const statusResult = await sock.fetchStatus(normalizedJid);
+                            if (statusResult && statusResult.status) {
+                                await db.collection('contacts').doc(normalizedJid).set(
+                                    { about: statusResult.status },
+                                    { merge: true }
+                                );
+                            }
+                        } catch (e) { /* status not available for this contact */ }
 
                         console.log(`✅ Verified and synced profile for ${name}`);
                     }
@@ -933,12 +987,47 @@ function listenToCommands(sock) {
                             updatePayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp();
                         }
 
+                        // Issue 7: Fetch bio/status for each contact
+                        if (!isGroup) {
+                            try {
+                                const statusResult = await sock.fetchStatus(jid);
+                                if (statusResult && statusResult.status) {
+                                    updatePayload.about = statusResult.status;
+                                }
+                            } catch (e) { /* status not available for this contact */ }
+                        }
+
                         if (Object.keys(updatePayload).length > 0) {
                             await db.collection('contacts').doc(jid).set(updatePayload, { merge: true });
                         }
                     }
                     console.log('✅ Bulk refresh complete.');
                 }
+
+                // Issue 1d: REFRESH_ALL_GROUPS command handler
+                if (data.type === 'REFRESH_ALL_GROUPS') {
+                    console.log('🔄 Fetching all joined groups...');
+                    try {
+                        const groups = await sock.groupFetchAllParticipating();
+                        for (const [groupJid, groupMeta] of Object.entries(groups)) {
+                            const jidLower = groupJid.toLowerCase();
+                            const payload = {
+                                jid: jidLower,
+                                name: groupMeta.subject || jidLower.split('@')[0],
+                                isGroup: true,
+                                avatarLetter: (groupMeta.subject || 'G').charAt(0).toUpperCase(),
+                                onlyAdminsCanMessage: groupMeta.announce || false,
+                                timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                            };
+                            const gpic = await fetchAndStoreProfilePic(jidLower, sock);
+                            if (gpic) { payload.profileUrl = gpic; payload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp(); }
+                            await db.collection('contacts').doc(jidLower).set(payload, { merge: true });
+                            console.log(`✅ Synced group: ${groupMeta.subject}`);
+                        }
+                        console.log('✅ All groups synced.');
+                    } catch (e) { console.error('Group sync error:', e.message); }
+                }
+
                 // Delete the command doc after processing
                 await change.doc.ref.delete();
             }
@@ -968,6 +1057,56 @@ function listenToReactionOutbox(sock) {
                     console.log(`✅ Sent reaction ${data.emoji} to ${data.msgKeyId}`);
                 } catch (e) {
                     console.error('Reaction send error:', e.message);
+                    await change.doc.ref.update({ status: 'error' });
+                }
+            }
+        }
+    });
+}
+
+// 10. Issue 14: PIN OUTBOX LISTENER
+function listenToPinOutbox(sock) {
+    console.log('📌 Listening for pin/unpin requests...');
+    return db.collection('outbox_pins').where('status', '==', 'pending').onSnapshot(async (snapshot) => {
+        for (const change of snapshot.docChanges()) {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                try {
+                    const msgSnap = await db.collection('messages')
+                        .where('msgKeyId', '==', data.msgKeyId)
+                        .limit(1)
+                        .get();
+
+                    if (!msgSnap.empty) {
+                        const msgData = msgSnap.docs[0].data();
+                        if (data.pin) {
+                            await sock.sendMessage(data.chatJid, {
+                                pin: {
+                                    type: 1, // 1 = 24h
+                                    key: {
+                                        remoteJid: data.chatJid,
+                                        id: data.msgKeyId,
+                                        fromMe: msgData.isMe || false,
+                                    }
+                                }
+                            });
+                        } else {
+                            await sock.sendMessage(data.chatJid, {
+                                pin: {
+                                    type: 0, // unpin
+                                    key: {
+                                        remoteJid: data.chatJid,
+                                        id: data.msgKeyId,
+                                        fromMe: msgData.isMe || false,
+                                    }
+                                }
+                            });
+                        }
+                        console.log(`📌 ${data.pin ? 'Pinned' : 'Unpinned'} message ${data.msgKeyId}`);
+                    }
+                    await change.doc.ref.delete();
+                } catch (e) {
+                    console.error('Pin error:', e.message);
                     await change.doc.ref.update({ status: 'error' });
                 }
             }

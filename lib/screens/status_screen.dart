@@ -69,21 +69,36 @@ class _StatusScreenState extends State<StatusScreen> {
     );
 
     try {
-      final url = Uri.parse('https://api.cloudinary.com/v1_1/druwafmub/image/upload');
-      final request = http.MultipartRequest('POST', url)
-        ..fields['upload_preset'] = 'whatsappClone'
-        ..files.add(await http.MultipartFile.fromPath('file', image.path));
+      final fileBytes = await image.readAsBytes();
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}_${image.name}';
+      final url = Uri.parse('https://ooopunhwxoffnfuawmmy.supabase.co/storage/v1/object/whatsapp-media/$fileName');
 
-      final response = await request.send();
-      if (response.statusCode != 200) {
-        throw Exception('Upload failed: HTTP ${response.statusCode}');
+      // Upload with retry to avoid SocketException on large files
+      const maxRetries = 3;
+      for (int attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          final request = http.MultipartRequest('POST', url)
+            ..headers['Authorization'] = 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9vb3B1bmh3eG9mZm5mdWF3bW15Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIxOTUyMzcsImV4cCI6MjA4Nzc3MTIzN30.qTyNjiDymtQhdruqvpcWQx-TIyxL2YK-k4rODtO9TcY'
+            ..headers['x-upsert'] = 'true'
+            ..files.add(http.MultipartFile.fromBytes('file', fileBytes, filename: fileName));
+
+          final response = await request.send().timeout(
+            const Duration(seconds: 120),
+          );
+
+          if (response.statusCode != 200 && response.statusCode != 201) {
+            final body = await response.stream.bytesToString();
+            throw Exception('Upload failed: HTTP ${response.statusCode}\n$body');
+          }
+          break; // success — exit retry loop
+        } catch (e) {
+          if (attempt == maxRetries) rethrow;
+          debugPrint('Upload attempt $attempt failed: $e — retrying…');
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
       }
-      final responseData = await response.stream.bytesToString();
-      final jsonResponse = jsonDecode(responseData);
-      final String? secureUrl = jsonResponse['secure_url'];
-      if (secureUrl == null || secureUrl.isEmpty) {
-        throw Exception('No URL returned from Cloudinary');
-      }
+      
+      final String secureUrl = 'https://ooopunhwxoffnfuawmmy.supabase.co/storage/v1/object/public/whatsapp-media/$fileName';
 
       await FirebaseFirestore.instance.collection('outbox_stories').add({
         'url': secureUrl,

@@ -29,6 +29,29 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
     super.dispose();
   }
 
+  // Issue 4: Search WhatsApp for contacts not in local list
+  Future<void> _searchWhatsApp(String query) async {
+    final cleanQuery = query.replaceAll(RegExp(r'[\s\-+()]'), '');
+    if (cleanQuery.isEmpty) return;
+
+    await FirebaseFirestore.instance.collection('address_book').doc(cleanQuery).set({
+      'phone': cleanQuery,
+      'name': query,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+
+    if (mounted) {
+      showCupertinoDialog(
+        context: context,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: const Text('Searching...'),
+          content: const Text('The contact will appear in your list if they are on WhatsApp.'),
+          actions: [CupertinoDialogAction(child: const Text('OK'), onPressed: () => Navigator.pop(ctx))],
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -136,7 +159,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
               ),
             ),
           ),
-          // Broadcast / New Group row
+          // Broadcast / New Group row — Issue 1d: New Group triggers REFRESH_ALL_GROUPS
           SliverToBoxAdapter(
             child: Padding(
               padding:
@@ -146,16 +169,31 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                   _quickAction(CupertinoIcons.antenna_radiowaves_left_right,
                       'Broadcast Lists'),
                   const SizedBox(width: 16),
-                  _quickAction(CupertinoIcons.person_2, 'New Group'),
+                  _quickAction(CupertinoIcons.person_2, 'New Group', onTap: () {
+                    FirebaseFirestore.instance.collection('commands').add({
+                      'type': 'REFRESH_ALL_GROUPS',
+                      'timestamp': FieldValue.serverTimestamp(),
+                    });
+                    showCupertinoDialog(
+                      context: context,
+                      builder: (ctx) => CupertinoAlertDialog(
+                        title: const Text('Syncing Groups'),
+                        content: const Text('Finding all your WhatsApp groups. This may take a moment.'),
+                        actions: [CupertinoDialogAction(child: const Text('OK'), onPressed: () => Navigator.pop(ctx))],
+                      ),
+                    );
+                  }),
                 ],
               ),
             ),
           ),
           // Real-time chat list from Firestore contacts collection
+          // Issue 1a: Added .limit(100) to prevent fetching all contacts
           StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
                   .collection('contacts')
                   .orderBy('timestamp', descending: true)
+                  .limit(100)
                   .snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
@@ -210,6 +248,22 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                   }).toList();
                 }
 
+                // Issue 2: Sort pinned chats first, then by timestamp desc
+                docs = List.from(docs)..sort((a, b) {
+                  final aData = a.data() as Map<String, dynamic>;
+                  final bData = b.data() as Map<String, dynamic>;
+                  final aPinned = aData['isPinned'] == true;
+                  final bPinned = bData['isPinned'] == true;
+                  if (aPinned != bPinned) return aPinned ? -1 : 1;
+                  final aTs = aData['timestamp'] as Timestamp?;
+                  final bTs = bData['timestamp'] as Timestamp?;
+                  if (aTs == null && bTs == null) return 0;
+                  if (aTs == null) return 1;
+                  if (bTs == null) return -1;
+                  return bTs.compareTo(aTs);
+                });
+
+                // Issue 4: Show "Search WhatsApp" when search has no results
                 if (docs.isEmpty) {
                   return SliverToBoxAdapter(
                     child: Padding(
@@ -233,6 +287,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                                     .withValues(alpha: 0.7),
                               ),
                             ),
+                            if (_searchQuery.isNotEmpty) ...[
+                              const SizedBox(height: 16),
+                              CupertinoButton(
+                                child: const Text('Search on WhatsApp'),
+                                onPressed: () => _searchWhatsApp(_searchQuery),
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -245,7 +306,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
                     (context, index) {
                     final data = docs[index].data() as Map<String, dynamic>;
                     final jid = docs[index].id;
-                    final name = data['name'] as String? ?? jid.split('@')[0];
+                    // Issue 5: Format phone-number-looking names
+                    String name = data['name'] as String? ?? jid.split('@')[0];
+                    if (RegExp(r'^\d{7,}$').hasMatch(name)) {
+                      name = '+$name';
+                    }
                     final lastMessage = data['lastMessage'] as String? ?? '';
                     final timestamp = data['timestamp'] as Timestamp?;
                     final avatarLetter = data['avatarLetter'] as String? ??
@@ -277,10 +342,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> with AutomaticKeepAli
       );
     }
 
-  Widget _quickAction(IconData icon, String label) {
+  // Issue 1d: _quickAction now accepts optional onTap callback
+  Widget _quickAction(IconData icon, String label, {VoidCallback? onTap}) {
     return CupertinoButton(
       padding: EdgeInsets.zero,
-      onPressed: () {},
+      onPressed: onTap ?? () {},
       child: Row(
         children: [
           Icon(icon, size: 18, color: CupertinoColors.systemBlue),
@@ -350,7 +416,8 @@ String _formatTimestamp(Timestamp? timestamp) {
   }
 }
 
-class _ChatTile extends StatefulWidget {
+// Issue 1b/11: _ChatTile is now StatelessWidget — press state isolated in _PressableTile
+class _ChatTile extends StatelessWidget {
   final String jid;
   final String name;
   final String lastMessage;
@@ -374,18 +441,11 @@ class _ChatTile extends StatefulWidget {
   });
 
   @override
-  State<_ChatTile> createState() => _ChatTileState();
-}
-
-class _ChatTileState extends State<_ChatTile> {
-  bool _pressed = false;
-
-  @override
   Widget build(BuildContext context) {
-    final timeStr = _formatTimestamp(widget.timestamp);
+    final timeStr = _formatTimestamp(timestamp);
 
     return Dismissible(
-      key: ValueKey(widget.jid),
+      key: ValueKey(jid),
       direction: DismissDirection.endToStart,
       background: Container(
         alignment: Alignment.centerRight,
@@ -400,7 +460,7 @@ class _ChatTileState extends State<_ChatTile> {
           context: context,
           builder: (ctx) => CupertinoAlertDialog(
             title: const Text('Delete Chat?'),
-            content: Text('Delete chat with ${widget.name}?'),
+            content: Text('Delete chat with $name?'),
             actions: [
               CupertinoDialogAction(
                 isDestructiveAction: true,
@@ -422,158 +482,237 @@ class _ChatTileState extends State<_ChatTile> {
       },
       onDismissed: (_) async {
         HapticFeedback.heavyImpact();
-        await FirebaseFirestore.instance.collection('contacts').doc(widget.jid).delete();
-        final msgs = await FirebaseFirestore.instance.collection('messages').where('chatId', isEqualTo: widget.jid).get();
+        await FirebaseFirestore.instance.collection('contacts').doc(jid).delete();
+        final msgs = await FirebaseFirestore.instance.collection('messages').where('chatId', isEqualTo: jid).get();
         if (msgs.docs.isNotEmpty) {
           final batch = FirebaseFirestore.instance.batch();
           for (var doc in msgs.docs) batch.delete(doc.reference);
           await batch.commit();
         }
       },
-      child: GestureDetector(
-        onTapDown: (_) => setState(() => _pressed = true),
-        onTapUp: (_) {
-          setState(() => _pressed = false);
-          Navigator.of(context).push(
-            CupertinoPageRoute(
-              builder: (_) => ChatDetailScreen(
-                contactJid: widget.jid,
-                contactName: widget.name,
-                avatarLetter: widget.avatarLetter,
-                profileUrl: widget.profileUrl,
+      child: _PressableTile(
+        jid: jid,
+        name: name,
+        lastMessage: lastMessage,
+        timeStr: timeStr,
+        avatarLetter: avatarLetter,
+        profileUrl: profileUrl,
+        unreadCount: unreadCount,
+        isGroup: isGroup,
+        isPinned: isPinned,
+      ),
+    );
+  }
+}
+
+// Separate tiny StatefulWidget just for press state (Issue 1b/11)
+class _PressableTile extends StatefulWidget {
+  final String jid;
+  final String name;
+  final String lastMessage;
+  final String timeStr;
+  final String avatarLetter;
+  final String? profileUrl;
+  final int unreadCount;
+  final bool isGroup;
+  final bool isPinned;
+
+  const _PressableTile({
+    required this.jid,
+    required this.name,
+    required this.lastMessage,
+    required this.timeStr,
+    required this.avatarLetter,
+    this.profileUrl,
+    this.unreadCount = 0,
+    this.isGroup = false,
+    this.isPinned = false,
+  });
+
+  @override
+  State<_PressableTile> createState() => _PressableTileState();
+}
+
+class _PressableTileState extends State<_PressableTile> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        // Issue 12d: Custom slide transition for page navigation
+        Navigator.of(context).push(
+          PageRouteBuilder(
+            pageBuilder: (_, animation, __) => ChatDetailScreen(
+              contactJid: widget.jid,
+              contactName: widget.name,
+              avatarLetter: widget.avatarLetter,
+              profileUrl: widget.profileUrl,
+            ),
+            transitionsBuilder: (_, animation, __, child) {
+              return SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(1.0, 0.0),
+                  end: Offset.zero,
+                ).animate(CurvedAnimation(
+                  parent: animation,
+                  curve: Curves.easeOutCubic,
+                )),
+                child: child,
+              );
+            },
+            transitionDuration: const Duration(milliseconds: 320),
+          ),
+        );
+      },
+      onTapCancel: () => setState(() => _pressed = false),
+      onLongPress: () {
+        HapticFeedback.mediumImpact();
+      },
+      // Issue 1c/10: iOS-style row with inset separator + pinned tint
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: widget.isPinned
+              ? CupertinoColors.systemGrey6.resolveFrom(context)
+              : (_pressed
+                  ? CupertinoColors.systemGrey5.resolveFrom(context)
+                  : CupertinoColors.systemBackground.resolveFrom(context)),
+        ),
+        child: Column(
+          children: [
+            // iOS-style inset separator (starts after avatar column)
+            Padding(
+              padding: const EdgeInsets.only(left: 80),
+              child: Container(
+                height: 0.33,
+                color: CupertinoColors.separator.resolveFrom(context),
               ),
             ),
-          );
-        },
-        onTapCancel: () => setState(() => _pressed = false),
-        onLongPress: () {
-          HapticFeedback.mediumImpact();
-        },
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 80),
-          color: _pressed
-              ? CupertinoColors.systemGrey5.resolveFrom(context)
-              : CupertinoColors.systemBackground.resolveFrom(context),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              // Avatar
-              SizedBox(
-                width: 52,
-                height: 52,
-                child: Stack(
-                  children: [
-                    (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
-                        ? ClipOval(
-                            child: CachedNetworkImage(
-                              imageUrl: widget.profileUrl!,
-                              width: 52,
-                              height: 52,
-                              fit: BoxFit.cover,
-                              placeholder: (context, url) => _buildFallbackAvatar(),
-                              errorWidget: (context, url, error) => _buildFallbackAvatar(),
-                            ),
-                          )
-                        : _buildFallbackAvatar(),
-                    if (widget.isGroup)
-                      Positioned(
-                        bottom: 0,
-                        right: 0,
-                        child: Container(
-                          width: 18,
-                          height: 18,
-                          decoration: BoxDecoration(
-                            color: CupertinoColors.systemGreen,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: CupertinoColors.white, width: 1.5),
-                          ),
-                          child: const Icon(
-                            CupertinoIcons.person_2_fill,
-                            size: 10,
-                            color: CupertinoColors.white,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              // Name + last message
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.name,
-                      style: const TextStyle(
-                        fontSize: 16.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      _formatLastMessage(widget.lastMessage),
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: CupertinoColors.systemGrey,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              // Timestamp + unread badge
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
                 children: [
-                  Text(
-                    timeStr,
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      color: CupertinoColors.systemGrey,
+                  // Avatar
+                  SizedBox(
+                    width: 52,
+                    height: 52,
+                    child: Stack(
+                      children: [
+                        (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
+                            ? ClipOval(
+                                child: CachedNetworkImage(
+                                  imageUrl: widget.profileUrl!,
+                                  width: 52,
+                                  height: 52,
+                                  fit: BoxFit.cover,
+                                  placeholder: (context, url) => _buildFallbackAvatar(),
+                                  errorWidget: (context, url, error) => _buildFallbackAvatar(),
+                                ),
+                              )
+                            : _buildFallbackAvatar(),
+                        if (widget.isGroup)
+                          Positioned(
+                            bottom: 0,
+                            right: 0,
+                            child: Container(
+                              width: 18,
+                              height: 18,
+                              decoration: BoxDecoration(
+                                color: CupertinoColors.systemGreen,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: CupertinoColors.white, width: 1.5),
+                              ),
+                              child: const Icon(
+                                CupertinoIcons.person_2_fill,
+                                size: 10,
+                                color: CupertinoColors.white,
+                              ),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-                  if (widget.unreadCount > 0) ...[
-                    const SizedBox(height: 4),
-                    TweenAnimationBuilder<double>(
-                      key: ValueKey(widget.unreadCount),
-                      tween: Tween(begin: 1.3, end: 1.0),
-                      duration: const Duration(milliseconds: 400),
-                      curve: Curves.elasticOut,
-                      builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: CupertinoColors.systemGreen,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Text(
-                          widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}',
+                  const SizedBox(width: 12),
+                  // Name + last message
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.name,
                           style: const TextStyle(
-                            fontSize: 12,
+                            fontSize: 16.5,
                             fontWeight: FontWeight.w600,
-                            color: CupertinoColors.white,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _formatLastMessage(widget.lastMessage),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: CupertinoColors.systemGrey,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Timestamp + unread badge
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        widget.timeStr,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          color: CupertinoColors.systemGrey,
                         ),
                       ),
-                    ),
-                  ],
-                  if (widget.isPinned) ...[
-                    const SizedBox(height: 4),
-                    const Icon(
-                      CupertinoIcons.pin_fill,
-                      size: 12,
-                      color: CupertinoColors.systemGrey,
-                    ),
-                  ],
+                      if (widget.unreadCount > 0) ...[
+                        const SizedBox(height: 4),
+                        TweenAnimationBuilder<double>(
+                          key: ValueKey(widget.unreadCount),
+                          tween: Tween(begin: 1.3, end: 1.0),
+                          duration: const Duration(milliseconds: 400),
+                          curve: Curves.elasticOut,
+                          builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: CupertinoColors.systemGreen,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              widget.unreadCount > 99 ? '99+' : '${widget.unreadCount}',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: CupertinoColors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                      if (widget.isPinned) ...[
+                        const SizedBox(height: 4),
+                        const Icon(
+                          CupertinoIcons.pin_fill,
+                          size: 12,
+                          color: CupertinoColors.systemGrey,
+                        ),
+                      ],
+                    ],
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
