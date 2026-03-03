@@ -68,6 +68,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   bool _hasText = false;
   int _unreadCount = 0; // for scroll-to-bottom badge
   int _prevDocCount = 0; // tracks previous message count to detect new arrivals
+  double _navPillScale = 1.0; // overscroll bounce for floating pill
 
   // Single shared contact stream — reused by presence subtitle AND bottom bar
   late final Stream<DocumentSnapshot> _contactStream;
@@ -465,7 +466,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                           const SizedBox(height: 10),
                           // ── Action items ──
                           ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
+                            borderRadius: BorderRadius.circular(20),
                             child: Container(
                               color: CupertinoColors.systemBackground.resolveFrom(ctx),
                               constraints: const BoxConstraints(minWidth: 220),
@@ -761,52 +762,109 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   // ─────────────────────────────────────────────
   //  BUILD
   // ─────────────────────────────────────────────
+  // Heights used for padding computations
+  static const double _kNavBarH = 56.0;
+  static const double _kBottomBarEstH = 68.0;
+
   @override
   Widget build(BuildContext context) {
+    final topPad = MediaQuery.of(context).padding.top;
+    final bottomPad = MediaQuery.of(context).padding.bottom;
     return CupertinoPageScaffold(
-      // Transparent — we handle the nav bar manually below
       backgroundColor: CupertinoColors.systemBackground.resolveFrom(context),
       child: Stack(
         children: [
-          // ── Wallpaper (edge-to-edge) ──
+          // LAYER 0: Wallpaper (edge-to-edge)
           const Positioned.fill(child: ChatWallpaperBackground()),
 
-          // ── Content (no SafeArea — nav bar handles top inset) ──
-          Column(
-            children: [
-              // ── Custom Nav Bar ──
-              _buildNavBar(context),
-              // ── Pinned message banner ──
-              _buildPinnedBanner(),
-              // ── Messages ──
-              Expanded(
-                child: Stack(
-                  children: [
-                    _buildMessageList(),
-                    // Scroll to bottom button
-                    if (_showScrollToBottom)
-                      Positioned(
-                        bottom: 12,
-                        right: 12,
-                        child: _ScrollToBottomButton(
-                          unreadCount: _unreadCount,
-                          onTap: () {
-                            _scrollController.animateTo(
-                              0,
-                              duration: const Duration(milliseconds: 350),
-                              curve: Curves.easeOutCubic,
-                            );
-                            // FIX: reset badge when user taps the button
-                            setState(() => _unreadCount = 0);
-                          },
-                        ),
-                      ),
-                  ],
+          // LAYER 1: Messages (edge-to-edge, scrolls behind bars)
+          Positioned.fill(child: _buildMessageList()),
+
+          // LAYER 1b: Scroll-to-bottom button
+          Positioned(
+            bottom: _kBottomBarEstH + bottomPad + 8,
+            right: 16,
+            child: AnimatedScale(
+              scale: _showScrollToBottom ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutBack,
+              child: _ScrollToBottomButton(
+                unreadCount: _unreadCount,
+                onTap: () {
+                  _scrollController.animateTo(
+                    0,
+                    duration: const Duration(milliseconds: 350),
+                    curve: Curves.easeOutCubic,
+                  );
+                  setState(() => _unreadCount = 0);
+                },
+              ),
+            ),
+          ),
+
+          // LAYER 2: Nav bar blur overlay (top)
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  height: topPad + _kNavBarH,
+                  color: CupertinoDynamicColor.resolve(
+                    const CupertinoDynamicColor.withBrightness(
+                      color: Color(0xCDF2F2F7),  // light frosted
+                      darkColor: Color(0xE01C1C1E),  // dark frosted
+                    ),
+                    context,
+                  ),
                 ),
               ),
-              // ── Bottom bar (blur + typing + input) ──
-              _buildBottomBar(),
-            ],
+            ),
+          ),
+
+          // LAYER 2b: Nav pills (on top of blur)
+          Positioned(
+            top: topPad + (_kNavBarH - 32) / 2,
+            left: 8,
+            right: 8,
+            child: AnimatedScale(
+              scale: _navPillScale,
+              duration: const Duration(milliseconds: 120),
+              curve: Curves.easeOut,
+              child: _buildNavBar(),
+            ),
+          ),
+
+          // LAYER 3: Pinned Bar
+          Positioned(
+            top: topPad + _kNavBarH + 4,
+            left: 20,
+            right: 20,
+            child: _buildPinnedBanner(),
+          ),
+
+          // LAYER 4: Bottom bar blur overlay + input
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: ClipRect(
+              child: BackdropFilter(
+                filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                child: Container(
+                  color: CupertinoDynamicColor.resolve(
+                    const CupertinoDynamicColor.withBrightness(
+                      color: Color(0xCDF2F2F7),
+                      darkColor: Color(0xE01C1C1E),
+                    ),
+                    context,
+                  ),
+                  child: _buildBottomBar(),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -816,175 +874,217 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   // ─────────────────────────────────────────────
   //  NAV BAR  (Telegram-style)
   // ─────────────────────────────────────────────
-  Widget _buildNavBar(BuildContext context) {
-    final topPad = MediaQuery.of(context).padding.top;
-    return ClipRect(
+  // ─ Saturation boost matrix (1.7×) for glass vibrancy ─
+  static const _kGlassSaturation = ColorFilter.matrix(<double>[
+    0.4124, 0.3576, 0.1805, 0, 0,
+    0.2126, 0.7152, 0.0722, 0, 0,
+    0.0193, 0.1192, 0.9505, 0, 0,
+    0,      0,      0,      1, 0,
+  ]);
+
+  // ─────────────────────────────────────────────
+  //  LIQUID GLASS PILL — shared container
+  // ─────────────────────────────────────────────
+  Widget _buildLiquidPill({required Widget child}) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-        child: Container(
-          padding: EdgeInsets.only(top: topPad),
-          height: 56 + topPad,
-          decoration: BoxDecoration(
-            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.75),
-            border: Border(
-              bottom: BorderSide(
-                color: CupertinoColors.separator.resolveFrom(context),
-                width: 0.33,
+        filter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+        child: ColorFiltered(
+          colorFilter: _kGlassSaturation,
+          child: Container(
+            padding: const EdgeInsets.all(0.5), // Specular border reflection
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  CupertinoColors.white.withValues(alpha: 0.6),
+                  CupertinoColors.white.withValues(alpha: 0.05),
+                  CupertinoColors.white.withValues(alpha: 0.02),
+                  CupertinoColors.white.withValues(alpha: 0.3),
+                ],
+                stops: const [0.0, 0.3, 0.7, 1.0],
               ),
             ),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(23.5),
+              ),
+              child: child,
+            ),
           ),
+        ),
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  //  HEADER CONTENT — 3 separate Telegram-style pills
+  // ─────────────────────────────────────────────
+  Widget _buildNavBar() {
+    final pillColor = CupertinoDynamicColor.resolve(
+      const CupertinoDynamicColor.withBrightness(
+        color: Color(0xB8FFFFFF),   // white frosted 0.72
+        darkColor: Color(0xD92C2C2E), // dark frosted 0.85
+      ),
+      context,
+    );
+
+    return Row(
+      children: [
+        // ── BACK PILL ──
+        _NavPressablePill(
+          height: 32,
+          radius: 16,
+          color: pillColor,
+          onTap: () => Navigator.of(context).pop(),
           child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              // Back button
-              CupertinoButton(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                onPressed: () => Navigator.of(context).pop(),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Telegram-exact back arrow from SVG asset
-                    SvgPicture.asset(
-                      'assets/Images.xcassets/Navigation/BackArrow.imageset/BackArrow.svg',
-                      width: 13,
-                      height: 22,
-                      colorFilter: ColorFilter.mode(
-                        CupertinoColors.systemBlue.resolveFrom(context),
-                        BlendMode.srcIn,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    const Text(
-                      'Chats',
-                      style: TextStyle(
-                        color: CupertinoColors.systemBlue,
-                        fontSize: 17,
-                      ),
-                    ),
-                  ],
-                ),
+              Icon(
+                CupertinoIcons.back,
+                color: CupertinoColors.systemBlue.resolveFrom(context),
+                size: 20,
               ),
-              // Center: Telegram iOS — avatar left of name+subtitle
-              Expanded(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => Navigator.of(context).push(
-                    CupertinoPageRoute(
-                      builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Avatar (34px, Telegram nav size)
-                      GestureDetector(
-                        onTap: _openProfileViewer,
-                        child: Container(
-                          width: 34,
-                          height: 34,
-                          decoration: const BoxDecoration(
-                            shape: BoxShape.circle,
-                            gradient: LinearGradient(
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                              colors: [Color(0xFF54C5F8), Color(0xFF2196F3)],
-                            ),
-                          ),
-                          child: (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
-                              ? ClipOval(
-                                  child: CachedNetworkImage(
-                                    imageUrl: widget.profileUrl!,
-                                    fit: BoxFit.cover,
-                                    placeholder: (_, __) => _buildFallbackAvatar(34),
-                                    errorWidget: (_, __, ___) => _buildFallbackAvatar(34),
-                                  ),
-                                )
-                              : _buildFallbackAvatar(34),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Name + presence stacked vertically
-                      Flexible(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              widget.contactName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 17,
-                                fontWeight: FontWeight.w700,
-                                height: 1.15,
-                                color: CupertinoColors.label,
-                                letterSpacing: -0.4,
-                              ),
-                            ),
-                            const SizedBox(height: 1),
-                            _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
+              const SizedBox(width: 3),
+              Text(
+                'Chats',
+                style: TextStyle(
+                  color: CupertinoColors.systemBlue.resolveFrom(context),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w400,
                 ),
-              ),
-              // Right: video + phone buttons
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CupertinoButton(
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    // FIX: Show a clear message instead of a silent tap (calls not yet implemented)
-                    onPressed: () => showCupertinoDialog(
-                      context: context,
-                      builder: (ctx) => CupertinoAlertDialog(
-                        title: const Text('Video Call'),
-                        content: const Text('Video calling is not yet supported.'),
-                        actions: [
-                          CupertinoDialogAction(
-                            isDefaultAction: true,
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('OK'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    child: const Icon(
-                      CupertinoIcons.video_camera,
-                      color: CupertinoColors.systemBlue,
-                      size: 26,
-                    ),
-                  ),
-                  CupertinoButton(
-                    padding: const EdgeInsets.only(right: 12),
-                    onPressed: () => showCupertinoDialog(
-                      context: context,
-                      builder: (ctx) => CupertinoAlertDialog(
-                        title: const Text('Voice Call'),
-                        content: const Text('Voice calling is not yet supported.'),
-                        actions: [
-                          CupertinoDialogAction(
-                            isDefaultAction: true,
-                            onPressed: () => Navigator.pop(ctx),
-                            child: const Text('OK'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    child: const Icon(
-                      CupertinoIcons.phone,
-                      color: CupertinoColors.systemBlue,
-                      size: 24,
-                    ),
-                  ),
-                ],
               ),
             ],
           ),
         ),
-      ),
+        const SizedBox(width: 8),
+
+        // ── CENTER PILL (avatar + name + status) ──
+        Expanded(
+          child: Center(
+            child: _NavPressablePill(
+              height: 40,
+              radius: 18,
+              color: pillColor,
+              onTap: () => Navigator.of(context).push(
+                CupertinoPageRoute(
+                  builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  GestureDetector(
+                    onTap: _openProfileViewer,
+                    child: Container(
+                      width: 30,
+                      height: 30,
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [Color(0xFF54C5F8), Color(0xFF2196F3)],
+                        ),
+                      ),
+                      child: (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
+                          ? ClipOval(
+                              child: CachedNetworkImage(
+                                imageUrl: widget.profileUrl!,
+                                fit: BoxFit.cover,
+                                placeholder: (_, __) => _buildFallbackAvatar(30),
+                                errorWidget: (_, __, ___) => _buildFallbackAvatar(30),
+                              ),
+                            )
+                          : _buildFallbackAvatar(30),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.contactName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            height: 1.15,
+                            color: CupertinoColors.label.resolveFrom(context),
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+
+        // ── RIGHT ICONS (video + phone) — individual 34px circles ──
+        _NavPressablePill(
+          height: 34,
+          radius: 17,
+          color: pillColor,
+          onTap: () => showCupertinoDialog(
+            context: context,
+            builder: (ctx) => CupertinoAlertDialog(
+              title: const Text('Video Call'),
+              content: const Text('Video calling is not yet supported.'),
+              actions: [
+                CupertinoDialogAction(
+                  isDefaultAction: true,
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          ),
+          child: Icon(
+            CupertinoIcons.video_camera,
+            color: CupertinoColors.systemBlue.resolveFrom(context),
+            size: 20,
+          ),
+        ),
+        const SizedBox(width: 8),
+        _NavPressablePill(
+          height: 34,
+          radius: 17,
+          color: pillColor,
+          onTap: () => showCupertinoDialog(
+            context: context,
+            builder: (ctx) => CupertinoAlertDialog(
+              title: const Text('Voice Call'),
+              content: const Text('Voice calling is not yet supported.'),
+              actions: [
+                CupertinoDialogAction(
+                  isDefaultAction: true,
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          ),
+          child: Icon(
+            CupertinoIcons.phone,
+            color: CupertinoColors.systemBlue.resolveFrom(context),
+            size: 19,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1018,7 +1118,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       builder: (context, snap) {
         if (!snap.hasData || snap.data!.docs.isEmpty) return const SizedBox.shrink();
         final docs = snap.data!.docs;
-        // Clamp index in case a message was unpinned
         final idx = _pinnedIndex.clamp(0, docs.length - 1);
         final pinned = docs[idx].data() as Map<String, dynamic>;
         final pinnedText = pinned['text'] as String? ?? '';
@@ -1033,29 +1132,36 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ? '🎤 Voice message'
                         : '📎 Attachment';
 
-        return ClipRect(
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.85),
-                border: Border(
-                  bottom: BorderSide(
-                    color: CupertinoColors.separator.resolveFrom(context),
-                    width: 0.33,
-                  ),
+        return _buildLiquidPill(
+          child: SizedBox(
+            height: 40,
+            child: Row(
+              children: [
+                // Pin icon
+                const Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: Text('📌', style: TextStyle(fontSize: 14)),
                 ),
-              ),
-              // FIX: Tap the banner body to cycle through pinned messages (Telegram-style)
-              child: GestureDetector(
-                onTap: () => setState(() => _pinnedIndex = (idx + 1) % docs.length),
-                child: Row(
-                  children: [
-                    _PinnedProgressBar(total: docs.length, activeIndex: idx),
-                    const SizedBox(width: 10),
-                    Expanded(
+                _PinnedProgressBar(total: docs.length, activeIndex: idx),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => setState(() => _pinnedIndex = (idx + 1) % docs.length),
+                    child: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 200),
+                      transitionBuilder: (child, anim) {
+                        final slide = Tween<Offset>(
+                          begin: const Offset(0, 0.5),
+                          end: Offset.zero,
+                        ).animate(anim);
+                        return SlideTransition(
+                          position: slide,
+                          child: FadeTransition(opacity: anim, child: child),
+                        );
+                      },
                       child: Column(
+                        key: ValueKey('pin_$idx'),
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -1082,55 +1188,46 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ],
                       ),
                     ),
-                    // FIX: Close button now only hides the banner locally,
-                    // it does NOT unpin the message on WhatsApp.
-                    // Use the long-press context menu "Unpin" to actually unpin.
-                    CupertinoButton(
-                      padding: EdgeInsets.zero,
-                      minSize: 32,
-                      onPressed: () {
-                        // Dismiss by navigating past all pins (visual hide)
-                        // We do this by removing from local state via a flag on the doc —
-                        // but since we can't mutate Firestore just to hide, we pop back
-                        // and let the stream rebuild. The simplest correct approach:
-                        // just unpin the currently viewed pin (same as before) but
-                        // show a confirmation first.
-                        showCupertinoDialog(
-                          context: context,
-                          builder: (ctx) => CupertinoAlertDialog(
-                            title: const Text('Unpin Message'),
-                            content: const Text(
-                                'Do you want to unpin this message for everyone?'),
-                            actions: [
-                              CupertinoDialogAction(
-                                isDestructiveAction: true,
-                                onPressed: () {
-                                  Navigator.pop(ctx);
-                                  FirebaseFirestore.instance
-                                      .collection('messages')
-                                      .doc(docs[idx].id)
-                                      .update({'isPinned': false, 'pinnedAt': null});
-                                },
-                                child: const Text('Unpin'),
-                              ),
-                              CupertinoDialogAction(
-                                isDefaultAction: true,
-                                onPressed: () => Navigator.pop(ctx),
-                                child: const Text('Cancel'),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                      child: Icon(
-                        CupertinoIcons.xmark,
-                        size: 16,
-                        color: CupertinoColors.systemGrey.resolveFrom(context),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+                CupertinoButton(
+                  padding: EdgeInsets.zero,
+                  minSize: 32,
+                  onPressed: () {
+                    showCupertinoDialog(
+                      context: context,
+                      builder: (ctx) => CupertinoAlertDialog(
+                        title: const Text('Unpin Message'),
+                        content: const Text(
+                            'Do you want to unpin this message for everyone?'),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDestructiveAction: true,
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              FirebaseFirestore.instance
+                                  .collection('messages')
+                                  .doc(docs[idx].id)
+                                  .update({'isPinned': false, 'pinnedAt': null});
+                            },
+                            child: const Text('Unpin'),
+                          ),
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('Cancel'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                  child: Icon(
+                    CupertinoIcons.xmark,
+                    size: 16,
+                    color: CupertinoColors.systemGrey.resolveFrom(context),
+                  ),
+                ),
+              ],
             ),
           ),
         );
@@ -1229,6 +1326,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 });
               }
             }
+            // Overscroll bounce for nav pill (reverse list: overscroll at bottom = list top)
+            if (notification is OverscrollNotification) {
+              if (_navPillScale != 0.98) {
+                setState(() => _navPillScale = 0.98);
+              }
+            } else if (notification is ScrollEndNotification) {
+              if (_navPillScale != 1.0) {
+                setState(() => _navPillScale = 1.0);
+              }
+            }
             return false;
           },
           child: ListView.builder(
@@ -1236,7 +1343,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             reverse: true,
             cacheExtent: 500.0,
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-            padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+            padding: EdgeInsets.fromLTRB(
+              4,
+              _kBottomBarEstH + MediaQuery.of(context).padding.bottom + 8,
+              4,
+              _kNavBarH + MediaQuery.of(context).padding.top + 8,
+            ),
             itemCount: docs.length,
             itemBuilder: (context, index) {
               final data = docs[index].data() as Map<String, dynamic>;
@@ -1373,88 +1485,98 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  BOTTOM BAR  (blur + typing + input)
   // ─────────────────────────────────────────────
   Widget _buildBottomBar() {
-    return ClipRect(
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-        child: Container(
-          decoration: BoxDecoration(
-            color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.94),
-            border: Border(
-              top: BorderSide(
-                color: CupertinoColors.separator.resolveFrom(context),
-                width: 0.33,
-              ),
-            ),
-          ),
-          child: SafeArea(
-            top: false,
-            child: StreamBuilder<DocumentSnapshot>(
-              stream: _contactStream, // reuse the single shared stream
-              builder: (context, snapshot) {
-                bool isAdminOnly = false;
-                bool isTyping = false;
-                if (snapshot.hasData && snapshot.data!.exists) {
-                  final d = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-                  isAdminOnly = d['onlyAdminsCanMessage'] == true;
-                  isTyping = d['presence'] == 'composing';
-                }
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 8, right: 8, bottom: 4, top: 4),
+        child: StreamBuilder<DocumentSnapshot>(
+          stream: _contactStream,
+          builder: (context, snapshot) {
+            bool isAdminOnly = false;
+            bool isTyping = false;
+            if (snapshot.hasData && snapshot.data!.exists) {
+              final d = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+              isAdminOnly = d['onlyAdminsCanMessage'] == true;
+              isTyping = d['presence'] == 'composing';
+            }
 
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Typing bubble
-                    if (isTyping)
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.only(left: 14, bottom: 4, top: 6),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: CupertinoDynamicColor.resolve(
-                              const CupertinoDynamicColor.withBrightness(
-                                color: Color(0xFFE5E5EA),
-                                darkColor: Color(0xFF2C2C2E),
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Typing bubble
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 250),
+                          transitionBuilder: (child, anim) {
+                            return FadeTransition(
+                              opacity: anim,
+                              child: ScaleTransition(
+                                scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
+                                alignment: Alignment.bottomLeft,
+                                child: child,
                               ),
-                              context,
-                            ),
-                            borderRadius: const BorderRadius.only(
-                              topLeft: Radius.circular(18),
-                              topRight: Radius.circular(18),
-                              bottomRight: Radius.circular(18),
-                              bottomLeft: Radius.circular(4),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: CupertinoColors.black.withValues(alpha: 0.08),
-                                blurRadius: 4,
-                                offset: const Offset(0, 1),
+                            );
+                          },
+                          child: isTyping
+                              ? Align(
+                                  key: const ValueKey('typing_bubble'),
+                                  alignment: Alignment.centerLeft,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(left: 6, bottom: 4, top: 6),
+                                    child: CustomPaint(
+                                      painter: _BubbleTailPainter(
+                                        color: CupertinoDynamicColor.resolve(
+                                          const CupertinoDynamicColor.withBrightness(
+                                            color: Color(0xFFE5E5EA),
+                                            darkColor: Color(0xFF2C2C2E),
+                                          ),
+                                          context,
+                                        ),
+                                        isOutgoing: false,
+                                      ),
+                                      child: Container(
+                                        margin: const EdgeInsets.only(left: 8),
+                                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                        decoration: BoxDecoration(
+                                          color: CupertinoDynamicColor.resolve(
+                                            const CupertinoDynamicColor.withBrightness(
+                                              color: Color(0xFFE5E5EA),
+                                              darkColor: Color(0xFF2C2C2E),
+                                            ),
+                                            context,
+                                          ),
+                                          borderRadius: const BorderRadius.only(
+                                            topLeft: Radius.circular(18),
+                                            topRight: Radius.circular(18),
+                                            bottomRight: Radius.circular(18),
+                                            bottomLeft: Radius.circular(4),
+                                          ),
+                                        ),
+                                        child: const _TypingIndicator(),
+                                      ),
+                                    ),
+                                  ),
+                                )
+                              : const SizedBox.shrink(key: ValueKey('no_typing')),
+                        ),
+                        if (isAdminOnly)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            child: Text(
+                              'Only admins can send messages',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: CupertinoColors.secondaryLabel.resolveFrom(context),
                               ),
-                            ],
-                          ),
-                          child: const _TypingIndicator(),
-                        ),
-                      ),
-                    if (isAdminOnly)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        child: Text(
-                          'Only admins can send messages',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                          ),
-                        ),
-                      )
-                    else
-                      _buildInputBar(),
-                  ],
-                );
-              },
-            ),
+                            ),
+                          )
+                        else
+                          _buildInputBar(),
+                ],
+              );
+            },
           ),
         ),
-      ),
-    );
+      );
   }
 
   // ─────────────────────────────────────────────
@@ -1464,38 +1586,152 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Reply banner (animates in/out)
-        AnimatedSize(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
+        // Reply banner (animates in/out with slide + fade)
+        AnimatedSwitcher(
+          duration: const Duration(milliseconds: 300),
+          switchInCurve: Curves.easeOutBack,
+          switchOutCurve: Curves.easeIn,
+          transitionBuilder: (child, animation) {
+            final slide = Tween<Offset>(
+              begin: const Offset(0, 1.0),
+              end: Offset.zero,
+            ).animate(animation);
+            return SlideTransition(
+              position: slide,
+              child: FadeTransition(
+                opacity: animation,
+                child: child,
+              ),
+            );
+          },
           child: _replyingTo != null
-              ? _ReplyBanner(
-                  data: _replyingTo!,
-                  onCancel: () => setState(() => _replyingTo = null),
+              ? KeyedSubtree(
+                  key: const ValueKey('reply_banner'),
+                  child: Container(
+                    margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
+                    padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                    decoration: BoxDecoration(
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xE0FFFFFF),   // near-white 0.88
+                          darkColor: Color(0xEB2C2C2E), // dark 0.92
+                        ),
+                        context,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: CupertinoColors.separator.resolveFrom(context),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        // Blue accent bar
+                        Container(
+                          width: 3,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: CupertinoColors.systemBlue.resolveFrom(context),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                _replyingTo!['senderName'] ?? 'Reply',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: CupertinoColors.systemBlue.resolveFrom(context),
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                _replyingTo!['body'] ?? '',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        CupertinoButton(
+                          padding: EdgeInsets.zero,
+                          minSize: 28,
+                          onPressed: () => setState(() => _replyingTo = null),
+                          child: Icon(
+                            CupertinoIcons.xmark_circle_fill,
+                            size: 20,
+                            color: CupertinoColors.systemGrey.resolveFrom(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 )
               : const SizedBox.shrink(),
         ),
         // Input row
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+          padding: const EdgeInsets.fromLTRB(4, 6, 4, 6),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              // Attach button
-              _InputIconButton(
-                assetPath: 'assets/Images.xcassets/Chat/Input/Text/IconAttachment.imageset/ModernConversationAttach@3x.png',
-                onTap: _pickAndSendMedia,
+              // Attach button — circle pill
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: GestureDetector(
+                  onTap: _pickAndSendMedia,
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xB8FFFFFF),
+                          darkColor: Color(0xD92C2C2E),
+                        ),
+                        context,
+                      ),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      CupertinoIcons.add_circled,
+                      size: 22,
+                      color: CupertinoColors.systemBlue.resolveFrom(context),
+                    ),
+                  ),
+                ),
               ),
-              const SizedBox(width: 4),
-              // Text field
+              const SizedBox(width: 6),
+              // Text field — frosted pill
               Expanded(
                 child: Container(
                   constraints: const BoxConstraints(maxHeight: 140),
                   decoration: BoxDecoration(
-                    color: CupertinoColors.systemBackground.resolveFrom(context),
+                    color: CupertinoDynamicColor.resolve(
+                      const CupertinoDynamicColor.withBrightness(
+                        color: Color(0xE6FFFFFF),   // white 0.90
+                        darkColor: Color(0xEB2C2C2E), // dark 0.92
+                      ),
+                      context,
+                    ),
                     borderRadius: BorderRadius.circular(22),
                     border: Border.all(
-                      color: CupertinoColors.separator.resolveFrom(context),
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xFFD0D0D0),
+                          darkColor: Color(0xFF48484A),
+                        ),
+                        context,
+                      ),
                       width: 0.5,
                     ),
                   ),
@@ -1565,8 +1801,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ],
           ),
         ),
-      ],
-    );
+      ]);
+
   }
 }
 
@@ -1705,11 +1941,8 @@ class _SpringEntranceWidgetState extends State<_SpringEntranceWidget>
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 600));
-    // Drive with a spring: starts at 0 (fully hidden), settles at 1 (fully visible)
-    final spring = SpringDescription(mass: 1, stiffness: 500, damping: 25);
-    final sim = SpringSimulation(spring, 0, 1, 0);
-    _ctrl.animateWith(sim);
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 280));
+    _ctrl.forward();
   }
 
   @override
@@ -1720,17 +1953,18 @@ class _SpringEntranceWidgetState extends State<_SpringEntranceWidget>
 
   @override
   Widget build(BuildContext context) {
+    final curved = CurvedAnimation(parent: _ctrl, curve: Curves.easeOutBack);
     return AnimatedBuilder(
-      animation: _ctrl,
+      animation: curved,
       builder: (_, child) {
-        final v = _ctrl.value.clamp(0.0, 1.0);
+        final v = curved.value.clamp(0.0, 1.0);
         return Opacity(
           opacity: v,
           child: Transform.scale(
-            scale: 0.8 + (0.2 * v),
+            scale: 0.92 + (0.08 * v),
             alignment: widget.isOutgoing ? Alignment.bottomRight : Alignment.bottomLeft,
             child: Transform.translate(
-              offset: Offset(widget.isOutgoing ? (1 - v) * 20 : (1 - v) * -20, 0),
+              offset: Offset(widget.isOutgoing ? (1 - v) * 30 : (1 - v) * -30, 0),
               child: child,
             ),
           ),
@@ -1803,8 +2037,8 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
     // damping: 1.0 is critically damped, < 1.0 has a bit of "bounce".
     final spring = SpringDescription(
       mass: 1,
-      stiffness: 600, // Higher = snappier
-      damping: 28,    // Higher = less oscillation
+      stiffness: 500, // Telegram-spec weighted feel
+      damping: 30,    // Balanced oscillation
     );
     
     // 2. Create the simulation starting from current offset to 0
@@ -2587,13 +2821,18 @@ class _ReplyBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Left accent
-          Container(
-            width: 3,
-            height: 40,
-            decoration: BoxDecoration(
-              color: CupertinoColors.systemBlue,
-              borderRadius: BorderRadius.circular(2),
+          // Left accent — animates width from 0 → 3px
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 3),
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutBack,
+            builder: (_, w, __) => Container(
+              width: w,
+              height: 40,
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemBlue,
+                borderRadius: BorderRadius.circular(1.5),
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -2717,6 +2956,54 @@ class _ContextMenuDivider extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
+//  NAV PRESSABLE PILL (Telegram-style with press scale)
+// ─────────────────────────────────────────────
+class _NavPressablePill extends StatefulWidget {
+  final double height;
+  final double radius;
+  final Color color;
+  final VoidCallback onTap;
+  final Widget child;
+  const _NavPressablePill({
+    required this.height,
+    required this.radius,
+    required this.color,
+    required this.onTap,
+    required this.child,
+  });
+  @override
+  State<_NavPressablePill> createState() => _NavPressablePillState();
+}
+
+class _NavPressablePillState extends State<_NavPressablePill> {
+  double _scale = 1.0;
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _scale = 0.92),
+      onTapUp: (_) { setState(() => _scale = 1.0); widget.onTap(); },
+      onTapCancel: () => setState(() => _scale = 1.0),
+      child: AnimatedScale(
+        scale: _scale,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+        child: Container(
+          height: widget.height,
+          constraints: BoxConstraints(minWidth: widget.height),
+          padding: EdgeInsets.symmetric(horizontal: widget.radius * 0.5),
+          decoration: BoxDecoration(
+            color: widget.color,
+            borderRadius: BorderRadius.circular(widget.radius),
+          ),
+          alignment: Alignment.center,
+          child: widget.child,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
 //  SCROLL TO BOTTOM BUTTON
 // ─────────────────────────────────────────────
 class _ScrollToBottomButton extends StatelessWidget {
@@ -2731,24 +3018,47 @@ class _ScrollToBottomButton extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: CupertinoColors.systemBackground.resolveFrom(context),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: CupertinoColors.black.withValues(alpha: 0.20),
-                  blurRadius: 8,
-                  offset: const Offset(0, 3),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(22),
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+               child: Container(
+                width: 44,
+                height: 44,
+                padding: const EdgeInsets.all(0.5),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      CupertinoColors.white.withValues(alpha: 0.6),
+                      CupertinoColors.white.withValues(alpha: 0.05),
+                      CupertinoColors.white.withValues(alpha: 0.02),
+                      CupertinoColors.white.withValues(alpha: 0.3),
+                    ],
+                    stops: const [0.0, 0.3, 0.7, 1.0],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: CupertinoColors.black.withValues(alpha: 0.12),
+                      blurRadius: 20,
+                      spreadRadius: -5,
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: Icon(
-              CupertinoIcons.chevron_down,
-              size: 22,
-              color: CupertinoColors.systemBlue.resolveFrom(context),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(22),
+                  ),
+                  child: Icon(
+                    CupertinoIcons.chevron_down,
+                    size: 22,
+                    color: CupertinoColors.systemBlue.resolveFrom(context),
+                  ),
+                ),
+              ),
             ),
           ),
           if (unreadCount > 0)
@@ -2803,19 +3113,18 @@ class _PinnedProgressBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 3,
-      height: 36,
+      width: 2,
+      height: 30,
       child: Column(
         children: List.generate(total.clamp(1, 5), (i) {
           return Expanded(
             child: Container(
-              margin: EdgeInsets.only(bottom: i < total - 1 ? 2 : 0),
+              margin: EdgeInsets.only(bottom: i < total - 1 ? 3 : 0),
               decoration: BoxDecoration(
-                // FIX: active segment is full opacity, others are dimmed
                 color: i == activeIndex
                     ? CupertinoColors.systemBlue
                     : CupertinoColors.systemBlue.withValues(alpha: 0.35),
-                borderRadius: BorderRadius.circular(2),
+                borderRadius: BorderRadius.circular(1),
               ),
             ),
           );
@@ -2957,25 +3266,27 @@ class _DateChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        padding: const EdgeInsets.symmetric(vertical: 8),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+            filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
               decoration: BoxDecoration(
-                color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.75),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: CupertinoColors.separator.resolveFrom(context),
-                  width: 0.33,
+                color: CupertinoDynamicColor.resolve(
+                  const CupertinoDynamicColor.withBrightness(
+                    color: Color(0xCCF2F2F6),
+                    darkColor: Color(0xCC1C1C1E),
+                  ),
+                  context,
                 ),
+                borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
                 _formatDate(date),
                 style: TextStyle(
-                  fontSize: 12.5,
+                  fontSize: 12,
                   fontWeight: FontWeight.w500,
                   color: CupertinoColors.secondaryLabel.resolveFrom(context),
                 ),
