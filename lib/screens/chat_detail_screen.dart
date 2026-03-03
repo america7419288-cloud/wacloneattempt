@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:flutter/physics.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/cupertino.dart';
@@ -12,6 +13,8 @@ import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+// NEW-4: Tappable links in message text
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:flutter/material.dart' show Material;
 import 'contact_info_screen.dart';
 import '../chat_wallpaper_widget.dart';
@@ -21,22 +24,101 @@ import 'status_screen.dart' show kOwnJid;
 //  BUBBLE COLORS  (Telegram iOS exact palette)
 // ─────────────────────────────────────────────
 // Outgoing light: soft Telegram green. Dark: Telegram's deep blue.
+// FIX: Exact Telegram iOS bubble palette
 const _incomingBubbleColor = CupertinoDynamicColor.withBrightness(
-  color: Color(0xFFFFFFFF),
-  darkColor: Color(0xFF212B36),
+  color: Color(0xFFFFFFFF),       // pure white (light)
+  darkColor: Color(0xFF1C2733),   // Telegram's exact cool dark incoming
 );
 const _outgoingBubbleColor = CupertinoDynamicColor.withBrightness(
-  color: Color(0xFFEEFEE0),   // Telegram soft green (light mode)
-  darkColor: Color(0xFF2B5278), // Telegram dark mode blue
+  color: Color(0xFFEEFEDF),       // Telegram's slightly saturated green
+  darkColor: Color(0xFF2B5278),   // Telegram dark mode blue
 );
 
 // ─────────────────────────────────────────────
 //  DYNAMIC OUTGOING TEXT COLOR
 // ─────────────────────────────────────────────
-// Light mode: dark text on light-green bg. Dark mode: white on dark-blue bg.
+// FIX: Light mode black, dark mode pure white
 Color _outgoingTextColor(BuildContext context) {
   final brightness = CupertinoTheme.brightnessOf(context);
-  return brightness == Brightness.dark ? CupertinoColors.white : const Color(0xFF0D1A0D);
+  return brightness == Brightness.dark ? CupertinoColors.white : const Color(0xFF000000);
+}
+
+// ─────────────────────────────────────────────
+//  VIBRANCY CONSTANTS
+// ─────────────────────────────────────────────
+final _glassSaturationMatrix = Float64List.fromList([
+  0.213 + 0.787 * 1.2, 0.715 - 0.715 * 1.2, 0.072 - 0.072 * 1.2, 0, 0,
+  0.213 - 0.213 * 1.2, 0.715 + 0.285 * 1.2, 0.072 - 0.072 * 1.2, 0, 0,
+  0.213 - 0.213 * 1.2, 0.715 - 0.715 * 1.2, 0.072 + 0.928 * 1.2, 0, 0,
+  0, 0, 0, 1, 0,
+]);
+
+ui.ImageFilter _glassFilter({double sigma = 25}) {
+  return ui.ImageFilter.blur(sigmaX: sigma, sigmaY: sigma);
+}
+
+// ─────────────────────────────────────────────
+//  SPRING PHYSICS SPECS (Telegram Standard)
+// ─────────────────────────────────────────────
+const _kTelegramSpring = SpringDescription(
+  mass: 1.0,
+  stiffness: 600.0,
+  damping: 33.0,
+);
+
+const _kBounceSpring = SpringDescription(
+  mass: 1.0,
+  stiffness: 700.0,
+  damping: 28.0,
+);
+
+const _kSubtleSpring = SpringDescription(
+  mass: 1.0,
+  stiffness: 800.0,
+  damping: 40.0,
+);
+
+// NEW-3: Detect emoji-only messages for jumbo rendering
+bool _isEmojiOnly(String text) {
+  final cleaned = text.trim();
+  if (cleaned.isEmpty || cleaned.length > 8) return false;
+  // Remove all emoji codepoints; if nothing remains it's emoji-only
+  final noEmoji = cleaned.replaceAll(
+    RegExp(
+      r'[\u{1F600}-\u{1F64F}'
+      r'\u{1F300}-\u{1F5FF}'
+      r'\u{1F680}-\u{1F6FF}'
+      r'\u{1F1E0}-\u{1F1FF}'
+      r'\u{2600}-\u{27BF}'
+      r'\u{2300}-\u{23FF}'
+      r'\u{2B50}-\u{2B55}'
+      r'\u{FE00}-\u{FE0F}'
+      r'\u{200D}'
+      r'\u{20E3}'
+      r'\u{E0020}-\u{E007F}'
+      r'\u{1F900}-\u{1F9FF}'
+      r'\u{1FA00}-\u{1FA6F}'
+      r'\u{1FA70}-\u{1FAFF}'
+      r'\u{FE0F}'
+      r'\u{200B}-\u{200D}]',
+      unicode: true,
+    ),
+    '',
+  );
+  return noEmoji.trim().isEmpty;
+}
+
+// NEW-7: Compute constrained image display size preserving aspect ratio
+Size _imageDisplaySize(double? w, double? h) {
+  const maxW = 260.0;
+  const maxH = 320.0;
+  const minH = 120.0;
+  if (w == null || h == null || w == 0) return const Size(220, 180);
+  final ratio = w / h;
+  double dw = maxW, dh = dw / ratio;
+  if (dh > maxH) { dh = maxH; dw = dh * ratio; }
+  if (dh < minH) { dh = minH; dw = dh * ratio; }
+  return Size(dw.clamp(100, maxW), dh);
 }
 
 // ─────────────────────────────────────────────
@@ -69,9 +151,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   int _unreadCount = 0; // for scroll-to-bottom badge
   int _prevDocCount = 0; // tracks previous message count to detect new arrivals
   double _navPillScale = 1.0; // overscroll bounce for floating pill
+  // NEW-5: Highlighted message for jump-to-reply flash
+  String? _highlightedMsgKeyId;
+  // NEW-8: Contact typing state for in-list typing bubble
+  bool _isContactTyping = false;
 
   // Single shared contact stream — reused by presence subtitle AND bottom bar
   late final Stream<DocumentSnapshot> _contactStream;
+
+  // NEW-5: High-Fidelity Observers
+  late final _scrollProgress = ValueNotifier<double>(0.0);
+  bool _isMenuOpen = false; // For background scaling micro-interaction
 
   @override
   void initState() {
@@ -97,12 +187,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
 
     // Scroll-to-bottom tracking is now via NotificationListener (not per-pixel addListener)
-
+    _scrollController.addListener(_onScroll);
     _textController.addListener(_onTextChanged);
+  }
+
+  void _onScroll() {
+    if (_scrollController.hasClients) {
+      final p = (_scrollController.offset / 200.0).clamp(0.0, 1.0);
+      if (p != _scrollProgress.value) _scrollProgress.value = p;
+    }
   }
 
   @override
   void dispose() {
+    _scrollProgress.dispose();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -325,6 +423,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   void _showContextMenu(BuildContext ctx, Map<String, dynamic> data, String docId, Offset tapPosition) {
     if (data['deleted'] == true) return;
     HapticFeedback.mediumImpact();
+    setState(() => _isMenuOpen = true);
 
     const emojis = ['❤️', '👍', '😂', '😮', '😢', '🙏'];
     final isOutgoing = data['isMe'] == true;
@@ -335,7 +434,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       builder: (overlayCtx) {
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () => overlay?.remove(),
+          onTap: () {
+            overlay?.remove();
+            setState(() => _isMenuOpen = false);
+          },
           child: Material(
             color: const Color(0x00000000),
             child: Stack(
@@ -343,8 +445,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 // Blurred backdrop
                 Positioned.fill(
                   child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                    child: Container(color: CupertinoColors.black.withValues(alpha: 0.3)),
+                    filter: ui.ImageFilter.blur(sigmaX: 50, sigmaY: 50),
+                    child: Container(color: CupertinoColors.black.withValues(alpha: 0.2)),
                   ),
                 ),
                 // Menu — centered vertically, aligned to bubble side
@@ -355,6 +457,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     curve: Curves.easeOutBack,
                     builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
                     child: Container(
+                      width: 240, // Telegram exact width
                       margin: const EdgeInsets.symmetric(horizontal: 20),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -376,9 +479,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                 ),
                               ],
                             ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: emojis.asMap().entries.map((e) {
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: emojis.asMap().entries.map((e) {
                                 // FEATURE 6 — Reactions (toggle & update semantics)
                                 //
                                 // WhatsApp reactions are stored per (user, message) pair.
@@ -406,6 +511,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
                                     // Toggle: same emoji = remove; different = replace
                                     final emojiToSend = isSameEmoji ? '' : e.value;
+                                    setState(() => _isMenuOpen = false);
 
                                     // Write to WA outbox ('' = remove in WA protocol)
                                     FirebaseFirestore.instance
@@ -461,6 +567,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                   ),
                                 );
                               }).toList(),
+                              ),
                             ),
                           ),
                           const SizedBox(height: 10),
@@ -476,7 +583,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                   _ContextMenuItem(
                                     icon: CupertinoIcons.reply,
                                     label: 'Reply',
-                                    onTap: () { overlay?.remove(); _setReply(data); },
+                                    onTap: () { 
+                                      overlay?.remove(); 
+                                      setState(() => _isMenuOpen = false);
+                                      _setReply(data); 
+                                    },
                                   ),
                                   _ContextMenuDivider(),
                                   if (hasText) ...[
@@ -485,6 +596,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                       label: 'Copy',
                                       onTap: () {
                                         overlay?.remove();
+                                        setState(() => _isMenuOpen = false);
                                         Clipboard.setData(ClipboardData(text: data['text'] ?? ''));
                                         HapticFeedback.selectionClick();
                                       },
@@ -496,7 +608,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                         ? CupertinoIcons.pin_slash
                                         : CupertinoIcons.pin,
                                     label: data['isPinned'] == true ? 'Unpin' : 'Pin',
-                                    onTap: () { overlay?.remove(); _pinMessage(data, docId); },
+                                    onTap: () { 
+                                      overlay?.remove(); 
+                                      setState(() => _isMenuOpen = false);
+                                      _pinMessage(data, docId); 
+                                    },
                                   ),
                                   _ContextMenuDivider(),
                                   _ContextMenuItem(
@@ -505,6 +621,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                     isDestructive: true,
                                     onTap: () {
                                       overlay?.remove();
+                                      setState(() => _isMenuOpen = false);
                                       // FEATURE 2 — Delete for Everyone (Tombstone mechanism)
                                       //
                                       // WhatsApp enforces a ~48-hour window for delete-for-everyone.
@@ -770,122 +887,133 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
     final bottomPad = MediaQuery.of(context).padding.bottom;
+    // NEW-1: Explicit resizeToAvoidBottomInset: false for keyboard-synced slide
     return CupertinoPageScaffold(
+      resizeToAvoidBottomInset: false,
       backgroundColor: CupertinoColors.systemBackground.resolveFrom(context),
+      // NEW-1: AnimatedPadding slides entire chat body with keyboard
       child: Stack(
         children: [
           // LAYER 0: Wallpaper (edge-to-edge)
           const Positioned.fill(child: ChatWallpaperBackground()),
 
           // LAYER 1: Messages (edge-to-edge, scrolls behind bars)
-          Positioned.fill(child: _buildMessageList()),
+          Positioned.fill(
+            child: ValueListenableBuilder<double>(
+              valueListenable: _keyboardHeight,
+              builder: (_, kH, child) => Padding(
+                padding: EdgeInsets.only(bottom: kH + bottomPad + _kBottomBarEstH),
+                child: child,
+              ),
+              child: _buildMessageList(),
+            ),
+          ),
 
           // LAYER 1b: Scroll-to-bottom button
           Positioned(
-            bottom: _kBottomBarEstH + bottomPad + 8,
+            bottom: MediaQuery.of(context).viewInsets.bottom + _kBottomBarEstH + bottomPad + 8,
             right: 16,
-            child: AnimatedScale(
-              scale: _showScrollToBottom ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutBack,
-              child: _ScrollToBottomButton(
-                unreadCount: _unreadCount,
-                onTap: () {
-                  _scrollController.animateTo(
-                    0,
-                    duration: const Duration(milliseconds: 350),
-                    curve: Curves.easeOutCubic,
-                  );
-                  setState(() => _unreadCount = 0);
-                },
-              ),
+            child: _SpringScrollButton(
+              visible: _showScrollToBottom,
+              unreadCount: _unreadCount,
+              onTap: () {
+                _scrollController.animateTo(
+                  0,
+                  duration: const Duration(milliseconds: 350),
+                  curve: Curves.easeOutCubic,
+                );
+                setState(() => _unreadCount = 0);
+              },
             ),
           ),
 
-          // LAYER 2: Top scrim gradient (content darkening under nav)
-          Positioned(
-            top: 0, left: 0, right: 0,
-            height: topPad + _kNavBarH + 32,
-            child: IgnorePointer(
-              child: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      CupertinoDynamicColor.resolve(
-                        const CupertinoDynamicColor.withBrightness(
-                          color: Color(0xF0F2F2F7),   // nearly opaque light
-                          darkColor: Color(0xE8000000), // nearly opaque dark
-                        ),
-                        context,
+            // LAYER 2: Top scrim gradient (content darkening under nav)
+            Positioned(
+              top: 0, left: 0, right: 0,
+              // FIX: Match exact height of status bar + nav bar area
+              height: topPad + _kNavBarH, 
+              child: IgnorePointer(
+                child: ClipRect( // Ensures blur doesn't bleed out
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              // Use a much lower opacity (e.g., 0xAA is ~66% vs 0xF2 which is ~95%)
+                              color: Color(0xAAF2F2F7), 
+                              darkColor: Color(0xAA000000),
+                            ),
+                            context,
+                          ),
+                          const Color(0x00000000),
+                        ],
+                        // Start the fade earlier (0.0) so it's never a solid block
+                        stops: const [0.0, 1.0], 
                       ),
-                      const Color(0x00000000),
-                    ],
-                    stops: const [0.0, 1.0],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
 
-          // LAYER 3: Bottom scrim gradient (content darkening under input)
-          Positioned(
-            bottom: 0, left: 0, right: 0,
-            height: bottomPad + _kBottomBarEstH + 48,
-            child: IgnorePointer(
-              child: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.bottomCenter,
-                    end: Alignment.topCenter,
-                    colors: [
-                      CupertinoDynamicColor.resolve(
-                        const CupertinoDynamicColor.withBrightness(
-                          color: Color(0xF0F2F2F7),
-                          darkColor: Color(0xE8000000),
-                        ),
-                        context,
+            // LAYER 3: Bottom scrim gradient (content darkening under input)
+            Positioned(
+              bottom: 0, left: 0, right: 0,
+              // FIX: Match height to bottom bar + safe area exactly
+              height: bottomPad + _kBottomBarEstH,
+              child: IgnorePointer(
+                child: ClipRect(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.bottomCenter,
+                        end: Alignment.topCenter,
+                        colors: [
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0xAAF2F2F7),
+                              darkColor: Color(0xAA000000),
+                            ),
+                            context,
+                          ),
+                          const Color(0x00000000),
+                        ],
+                        stops: const [0.0, 1.0],
                       ),
-                      const Color(0x00000000),
-                    ],
-                    stops: const [0.0, 1.0],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
 
-          // LAYER 4: Nav pills (transparent bar, individual pill blur)
-          Positioned(
-            top: topPad + (_kNavBarH - 32) / 2,
-            left: 8,
-            right: 8,
-            child: AnimatedScale(
-              scale: _navPillScale,
-              duration: const Duration(milliseconds: 120),
-              curve: Curves.easeOut,
+            Positioned(
+              top: topPad + (_kNavBarH - 32) / 2,
+              left: 8,
+              right: 8,
               child: _buildNavBar(),
             ),
-          ),
 
-          // LAYER 5: Pinned Bar
-          Positioned(
-            top: topPad + _kNavBarH + 4,
-            left: 20,
-            right: 20,
-            child: _buildPinnedBanner(),
-          ),
+            // LAYER 5: Pinned Bar
+            Positioned(
+              top: topPad + _kNavBarH + 4,
+              left: 20,
+              right: 20,
+              child: _buildPinnedBanner(),
+            ),
 
-          // LAYER 6: Bottom bar (transparent, pills blur individually)
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: _buildBottomBar(),
-          ),
-        ],
-      ),
+            // NEW-1: LAYER 6 changed from Positioned to Align for keyboard sync
+            // LAYER 6: Bottom Bar (Input)
+            Positioned(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+              left: 0,
+              right: 0,
+              child: _buildBottomBar(),
+            ),
+          ],
+        ),
     );
   }
 
@@ -902,7 +1030,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return ClipRRect(
       borderRadius: BorderRadius.circular(20),
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        filter: _glassFilter(sigma: 25),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: BoxDecoration(
@@ -943,53 +1071,86 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Row(
       children: [
         // ── BACK PILL ──
-        _NavPressablePill(
-          height: 32,
-          radius: 16,
-          color: pillColor,
-          onTap: () => Navigator.of(context).pop(),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                CupertinoIcons.back,
-                color: CupertinoColors.systemBlue.resolveFrom(context),
-                size: 20,
-              ),
-              const SizedBox(width: 3),
-              Text(
-                'Chats',
-                style: TextStyle(
-                  color: CupertinoColors.systemBlue.resolveFrom(context),
-                  fontSize: 16,
-                  fontWeight: FontWeight.w400,
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            SpringScaleButton(
+              onTap: () => Navigator.of(context).pop(),
+              child: _buildLiquidPill(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 10,
+                      height: 20,
+                      child: CustomPaint(
+                        painter: _ThinChevron(CupertinoColors.systemBlue.resolveFrom(context)),
+                      ),
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      'Chats',
+                      style: TextStyle(
+                        color: CupertinoColors.systemBlue.resolveFrom(context),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
-          ),
+            ),
+            // Unread badge on back button (mock for now as count isn't global)
+            Positioned(
+              top: -2,
+              right: -2,
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: const BoxDecoration(
+                  color: CupertinoColors.systemRed,
+                  shape: BoxShape.circle,
+                ),
+                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                child: const Text(
+                  '12', // Placeholder
+                  style: TextStyle(
+                    color: CupertinoColors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          ],
         ),
         const SizedBox(width: 8),
 
         // ── CENTER PILL (avatar + name + status) ──
         Expanded(
           child: Center(
-            child: _NavPressablePill(
-              height: 40,
-              radius: 18,
-              color: pillColor,
-              onTap: () => Navigator.of(context).push(
-                CupertinoPageRoute(
-                  builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
-                ),
+            child: ValueListenableBuilder<double>(
+              valueListenable: _scrollProgress,
+              builder: (_, p, child) => Transform.scale(
+                scale: 1.0 - (p * 0.04), // Compress to 96% when scrolled
+                alignment: Alignment.center,
+                child: child,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
+              child: SpringScaleButton(
+                onTap: () => Navigator.of(context).push(
+                  CupertinoPageRoute(
+                    builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
+                  ),
+                ),
+                child: _buildLiquidPill(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                   GestureDetector(
                     onTap: _openProfileViewer,
                     child: Container(
-                      width: 30,
-                      height: 30,
+                      width: 34,
+                      height: 34,
                       decoration: const BoxDecoration(
                         shape: BoxShape.circle,
                         gradient: LinearGradient(
@@ -1003,11 +1164,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               child: CachedNetworkImage(
                                 imageUrl: widget.profileUrl!,
                                 fit: BoxFit.cover,
-                                placeholder: (_, __) => _buildFallbackAvatar(30),
-                                errorWidget: (_, __, ___) => _buildFallbackAvatar(30),
+                                placeholder: (_, __) => _buildFallbackAvatar(34),
+                                errorWidget: (_, __, ___) => _buildFallbackAvatar(34),
                               ),
                             )
-                          : _buildFallbackAvatar(30),
+                          : _buildFallbackAvatar(34),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -1021,11 +1182,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: 15,
+                            fontSize: 16,
                             fontWeight: FontWeight.w600,
                             height: 1.15,
                             color: CupertinoColors.label.resolveFrom(context),
-                            letterSpacing: -0.3,
+                            letterSpacing: -0.5,
                           ),
                         ),
                         const SizedBox(height: 1),
@@ -1035,6 +1196,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
             ),
           ),
         ),
@@ -1287,6 +1450,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             setState(() => _unreadCount += docs.length - _prevDocCount);
           }
         }
+
+        // POLISH-1: Haptic feedback on new incoming message
+        // FIX: Must check BEFORE updating _prevDocCount, otherwise comparison is always false
+        if (_prevDocCount > 0 && docs.length > _prevDocCount) {
+          final newest = docs.first.data() as Map<String, dynamic>;
+          if (newest['isMe'] != true) HapticFeedback.lightImpact();
+        }
         _prevDocCount = docs.length;
 
         // FEATURE 1 & 5: Fire read receipts so sender's ticks go blue.
@@ -1349,15 +1519,61 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             reverse: true,
             cacheExtent: 500.0,
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            // FIX-2: In reverse:true list, top = visual bottom (items), bottom = visual top (end of list)
             padding: EdgeInsets.fromLTRB(
               4,
-              _kBottomBarEstH + MediaQuery.of(context).padding.bottom + 80,  // visual bottom (reverse top)
+              _kNavBarH + MediaQuery.of(context).padding.top + 50,
               4,
-              _kNavBarH + MediaQuery.of(context).padding.top + 64,           // visual top (reverse bottom)
+              10, // Small gap at bottom (index 0) — outer Positioned padding handles majority
             ),
-            itemCount: docs.length,
+            itemCount: docs.length + (_isContactTyping ? 1 : 0),
             itemBuilder: (context, index) {
-              final data = docs[index].data() as Map<String, dynamic>;
+              // NEW-8: Typing bubble is the very first item (bottom-most visually)
+              if (_isContactTyping && index == 0) {
+                return Align(
+                  key: const ValueKey('typing_bubble'),
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 6, bottom: 4, top: 6),
+                    child: CustomPaint(
+                      painter: _BubbleTailPainter(
+                        color: CupertinoDynamicColor.resolve(
+                          const CupertinoDynamicColor.withBrightness(
+                            color: Color(0xFFE5E5EA),
+                            darkColor: Color(0xFF2C2C2E),
+                          ),
+                          context,
+                        ),
+                        isOutgoing: false,
+                      ),
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0xFFE5E5EA),
+                              darkColor: Color(0xFF2C2C2E),
+                            ),
+                            context,
+                          ),
+                          borderRadius: const BorderRadius.only(
+                            topLeft: Radius.circular(18),
+                            topRight: Radius.circular(18),
+                            bottomRight: Radius.circular(18),
+                            bottomLeft: Radius.circular(4),
+                          ),
+                        ),
+                        child: const _TypingIndicator(),
+                      ),
+                    ),
+                  ),
+                );
+              }
+
+              // Adjust doc index if typing bubble is present
+              final docIndex = _isContactTyping ? index - 1 : index;
+              final data = docs[docIndex].data() as Map<String, dynamic>;
               final isOutgoing = data['isMe'] == true;
               final timestamp = data['timestamp'] as Timestamp?;
 
@@ -1374,8 +1590,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               if (timestamp != null) {
                 final currentDate = timestamp.toDate();
                 DateTime? prevDate;
-                if (index < docs.length - 1) {
-                  final prevTs = (docs[index + 1].data() as Map<String, dynamic>)['timestamp']
+                if (docIndex < docs.length - 1) {
+                  final prevTs = (docs[docIndex + 1].data() as Map<String, dynamic>)['timestamp']
                       as Timestamp?;
                   prevDate = prevTs?.toDate();
                 }
@@ -1392,60 +1608,59 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               bool isTailMessage = true;
               bool isClusterMember = false;
 
-              if (index < docs.length - 1) {
-                final olderData = docs[index + 1].data() as Map<String, dynamic>;
+              if (docIndex < docs.length - 1) {
+                final olderData = docs[docIndex + 1].data() as Map<String, dynamic>;
                 final olderIsOutgoing = olderData['isMe'] == true;
                 final olderTs = olderData['timestamp'] as Timestamp?;
                 if (olderIsOutgoing == isOutgoing && timestamp != null && olderTs != null) {
                   final diff = timestamp.toDate().difference(olderTs.toDate()).abs();
-                  if (diff.inMinutes < 2) isClusterMember = true;
+                  if (diff.inSeconds < 60) isClusterMember = true;
                 }
               }
 
-              if (index > 0) {
-                final newerData = docs[index - 1].data() as Map<String, dynamic>;
+              if (docIndex > 0) {
+                final newerData = docs[docIndex - 1].data() as Map<String, dynamic>;
                 final newerIsOutgoing = newerData['isMe'] == true;
                 final newerTs = newerData['timestamp'] as Timestamp?;
                 if (newerIsOutgoing == isOutgoing && timestamp != null && newerTs != null) {
                   final diff = newerTs.toDate().difference(timestamp.toDate()).abs();
-                  if (diff.inMinutes < 2) isTailMessage = false;
+                  if (diff.inSeconds < 60) isTailMessage = false;
                 }
               }
 
-              final docId = docs[index].id;
+              final docId = docs[docIndex].id;
               final isGroup = widget.contactJid.endsWith('@g.us');
               final senderName = data['senderName'] as String? ?? '';
-              final isNewest = index == 0;
 
-              Widget item = _buildMessageItem(
-                context, data, docId, isOutgoing, isGroup, senderName,
-                dateHeader, timeStr, isTailMessage, isClusterMember,
-              );
-
-              // Entrance animation — spring for newest, stagger for initial load
-              if (isNewest) {
-                item = _SpringEntranceWidget(
-                  key: ValueKey('anim_$docId'),
+              Widget item = _TelegramBubbleEntrance(
+                key: ValueKey('entrance_$docId'),
+                isOutgoing: isOutgoing,
+                child: _ParallaxBubble(
                   isOutgoing: isOutgoing,
-                  child: item,
-                );
-              } else if (index < 8 && _prevDocCount <= 1) {
-                // Stagger initial load: first 8 messages cascade in
-                item = TweenAnimationBuilder<double>(
-                  key: ValueKey('stagger_$docId'),
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: Duration(milliseconds: 350 + (index * 40)),
-                  curve: Curves.easeOutCubic,
-                  builder: (_, v, child) => Opacity(
-                    opacity: v.clamp(0.0, 1.0),
-                    child: Transform.scale(
-                      scale: 0.9 + (0.1 * v),
-                      child: child,
-                    ),
+                  scrollController: _scrollController,
+                  child: _buildMessageItem(
+                    context, data, docId, isOutgoing, isGroup, senderName,
+                    dateHeader, timeStr, isTailMessage, isClusterMember,
+                    onJumpToMessage: (msgKeyId) {
+                      final idx = docs.indexWhere((d) =>
+                        (d.data() as Map)['msgKeyId'] == msgKeyId);
+                      if (idx == -1) return;
+                      _scrollController.animateTo(
+                        _scrollController.position.maxScrollExtent
+                            - (idx * 72.0),
+                        duration: const Duration(milliseconds: 420),
+                        curve: Curves.easeOutCubic,
+                      );
+                      setState(() => _highlightedMsgKeyId = msgKeyId);
+                      Future.delayed(const Duration(milliseconds: 1200), () {
+                        if (mounted) setState(() => _highlightedMsgKeyId = null);
+                      });
+                    },
+                    isHighlighted: _highlightedMsgKeyId != null &&
+                        data['msgKeyId'] == _highlightedMsgKeyId,
                   ),
-                  child: item,
-                );
-              }
+                ),
+              );
 
               return item;
             },
@@ -1465,8 +1680,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     Widget? dateHeader,
     String timeStr,
     bool isTailMessage,
-    bool isClusterMember,
-  ) {
+    bool isClusterMember, {
+    // NEW-5: Jump to replied message callback
+    void Function(String msgKeyId)? onJumpToMessage,
+    // NEW-5: Whether this bubble is highlighted
+    bool isHighlighted = false,
+  }) {
     return Column(
       children: [
         if (dateHeader != null) dateHeader,
@@ -1482,107 +1701,86 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           isClusterMember: isClusterMember,
           onReply: _setReply,
           onLongPress: (tapPosition) => _showContextMenu(context, data, docId, tapPosition),
+          // NEW-5: Pass jump-to-reply and highlight state
+          onJumpToMessage: onJumpToMessage,
+          isHighlighted: isHighlighted,
         ),
       ],
     );
   }
 
   // ─────────────────────────────────────────────
-  //  BOTTOM BAR  (blur + typing + input)
+  //  BOTTOM BAR  (blur + input)
   // ─────────────────────────────────────────────
   Widget _buildBottomBar() {
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.only(left: 8, right: 8, bottom: 4, top: 4),
-        child: StreamBuilder<DocumentSnapshot>(
-          stream: _contactStream,
-          builder: (context, snapshot) {
-            bool isAdminOnly = false;
-            bool isTyping = false;
-            if (snapshot.hasData && snapshot.data!.exists) {
-              final d = snapshot.data!.data() as Map<String, dynamic>? ?? {};
-              isAdminOnly = d['onlyAdminsCanMessage'] == true;
-              isTyping = d['presence'] == 'composing';
+    // NEW-1: Remove SafeArea wrapper, add manual padding with viewInsets
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 8, right: 8, top: 4,
+        bottom: MediaQuery.of(context).padding.bottom + 4,
+      ),
+      child: StreamBuilder<DocumentSnapshot>(
+        stream: _contactStream,
+        builder: (context, snapshot) {
+          bool isAdminOnly = false;
+          if (snapshot.hasData && snapshot.data!.exists) {
+            final d = snapshot.data!.data() as Map<String, dynamic>? ?? {};
+            isAdminOnly = d['onlyAdminsCanMessage'] == true;
+            // NEW-8: Update typing state for message list typing bubble
+            final typing = d['presence'] == 'composing';
+            if (typing != _isContactTyping) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) setState(() => _isContactTyping = typing);
+              });
             }
+          }
 
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Typing bubble
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 250),
-                          transitionBuilder: (child, anim) {
-                            return FadeTransition(
-                              opacity: anim,
-                              child: ScaleTransition(
-                                scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
-                                alignment: Alignment.bottomLeft,
-                                child: child,
-                              ),
-                            );
-                          },
-                          child: isTyping
-                              ? Align(
-                                  key: const ValueKey('typing_bubble'),
-                                  alignment: Alignment.centerLeft,
-                                  child: Padding(
-                                    padding: const EdgeInsets.only(left: 6, bottom: 4, top: 6),
-                                    child: CustomPaint(
-                                      painter: _BubbleTailPainter(
-                                        color: CupertinoDynamicColor.resolve(
-                                          const CupertinoDynamicColor.withBrightness(
-                                            color: Color(0xFFE5E5EA),
-                                            darkColor: Color(0xFF2C2C2E),
-                                          ),
-                                          context,
-                                        ),
-                                        isOutgoing: false,
-                                      ),
-                                      child: Container(
-                                        margin: const EdgeInsets.only(left: 8),
-                                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                        decoration: BoxDecoration(
-                                          color: CupertinoDynamicColor.resolve(
-                                            const CupertinoDynamicColor.withBrightness(
-                                              color: Color(0xFFE5E5EA),
-                                              darkColor: Color(0xFF2C2C2E),
-                                            ),
-                                            context,
-                                          ),
-                                          borderRadius: const BorderRadius.only(
-                                            topLeft: Radius.circular(18),
-                                            topRight: Radius.circular(18),
-                                            bottomRight: Radius.circular(18),
-                                            bottomLeft: Radius.circular(4),
-                                          ),
-                                        ),
-                                        child: const _TypingIndicator(),
-                                      ),
-                                    ),
-                                  ),
-                                )
-                              : const SizedBox.shrink(key: ValueKey('no_typing')),
-                        ),
-                        if (isAdminOnly)
-                          Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            child: Text(
-                              'Only admins can send messages',
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                              ),
-                            ),
-                          )
-                        else
-                          _buildInputBar(),
-                ],
-              );
-            },
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // NEW-8: Typing bubble removed from here — now in message list
+              if (isAdminOnly)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  child: Text(
+                    'Only admins can send messages',
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                    ),
+                  ),
+                )
+              else
+                _buildInputBar(),
+              // NEW-6: Safe area fill beneath input bar
+              _buildSafeAreaFill(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // NEW-6: Safe area colour fill beneath input bar
+  Widget _buildSafeAreaFill() {
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    if (bottomInset <= 0) return const SizedBox.shrink();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(0),
+      child: BackdropFilter(
+        filter: _glassFilter(sigma: 25),
+        child: Container(
+          height: bottomInset,
+          color: CupertinoDynamicColor.resolve(
+            const CupertinoDynamicColor.withBrightness(
+              color: Color(0xA8FFFFFF),
+              darkColor: Color(0xB22C2C2E),
+            ),
+            context,
           ),
         ),
-      );
+      ),
+    );
   }
 
   // ─────────────────────────────────────────────
@@ -1616,7 +1814,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(16),
                     child: BackdropFilter(
-                      filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                      filter: _glassFilter(sigma: 25),
                       child: Container(
                         margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
                         padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
@@ -1704,7 +1902,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(18),
                     child: BackdropFilter(
-                      filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                      filter: _glassFilter(sigma: 25),
                       child: Container(
                         width: 36,
                         height: 36,
@@ -1734,7 +1932,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(22),
                   child: BackdropFilter(
-                    filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                    filter: _glassFilter(sigma: 25),
                     child: Container(
                   constraints: const BoxConstraints(maxHeight: 140),
                   decoration: BoxDecoration(
@@ -1754,7 +1952,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ),
                         context,
                       ),
-                      width: 0.5,
+                      width: 0.33,
                     ),
                   ),
                   child: Row(
@@ -1765,7 +1963,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                           controller: _textController,
                           placeholder: 'Message',
                           maxLines: null,
-                          padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+                          padding: const EdgeInsets.fromLTRB(12, 8, 36, 8),
                           decoration: null,
                           style: TextStyle(
                             fontSize: 16,
@@ -1812,15 +2010,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               ),
               const SizedBox(width: 6),
               // Send / mic button
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                transitionBuilder: (child, anim) => ScaleTransition(
-                  scale: CurvedAnimation(parent: anim, curve: Curves.easeOutBack),
-                  child: child,
-                ),
-                child: _hasText
-                    ? _SendButton(key: const ValueKey('send'), onTap: _sendMessage)
-                    : _MicButton(key: const ValueKey('mic')),
+              _MorphSendButton(
+                hasText: _hasText,
+                onTap: _sendMessage,
               ),
             ],
           ),
@@ -1999,6 +2191,47 @@ class _SpringEntranceWidgetState extends State<_SpringEntranceWidget>
   }
 }
 
+// ─────────────────────────────────────────────
+//  PARALLAX BUBBLE (Scroll depth effect)
+// ─────────────────────────────────────────────
+class _ParallaxBubble extends StatelessWidget {
+  final bool isOutgoing;
+  final Widget child;
+  final ScrollController scrollController;
+
+  const _ParallaxBubble({
+    required this.isOutgoing,
+    required this.child,
+    required this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: scrollController,
+      builder: (context, child) {
+        double parallax = 0;
+        if (scrollController.hasClients) {
+          final renderObject = context.findRenderObject();
+          if (renderObject is RenderBox) {
+            final position = renderObject.localToGlobal(Offset.zero);
+            final screenH = MediaQuery.of(context).size.height;
+            // Distance from center of screen, normalized -1 to 1
+            final center = (position.dy - screenH / 2) / (screenH / 2);
+            // Outgoing shifts right when above center, left when below
+            parallax = center.clamp(-1.0, 1.0) * (isOutgoing ? 4.0 : -4.0);
+          }
+        }
+        return Transform.translate(
+          offset: Offset(parallax, 0),
+          child: child,
+        );
+      },
+      child: child,
+    );
+  }
+}
+
 // ═══════════════════════════════════════════════
 //  SWIPABLE BUBBLE ROW (spring animation)
 // ═══════════════════════════════════════════════
@@ -2014,6 +2247,10 @@ class _SwipableBubbleRow extends StatefulWidget {
   final bool isClusterMember;
   final void Function(Map<String, dynamic>) onReply;
   final void Function(Offset tapPosition) onLongPress;
+  // NEW-5: Jump to replied message callback
+  final void Function(String msgKeyId)? onJumpToMessage;
+  // NEW-5: Highlight state for jump-to-reply flash
+  final bool isHighlighted;
 
   const _SwipableBubbleRow({
     required this.data,
@@ -2027,6 +2264,8 @@ class _SwipableBubbleRow extends StatefulWidget {
     this.isClusterMember = false,
     required this.onReply,
     required this.onLongPress,
+    this.onJumpToMessage,
+    this.isHighlighted = false,
   });
 
   @override
@@ -2039,6 +2278,14 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
   bool _didTriggerHaptic = false;
   double _dragOffset = 0;
   Offset _lastTapPosition = Offset.zero;
+
+  // NEW-2: iOS-style rubber-band resistance past trigger point
+  static double _rubberBand(double x) {
+    const limit = 44.0;
+    const max = 72.0;
+    if (x <= limit) return x;
+    return limit + (x - limit) * (1 - (x - limit) / (max - limit)) * 0.4;
+  }
 
   @override
   void initState() {
@@ -2085,7 +2332,9 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
         final delta = widget.isOutgoing ? -details.delta.dx : details.delta.dx;
         if (delta > 0 || _dragOffset > 0) {
           setState(() {
-            _dragOffset = (_dragOffset + delta).clamp(0.0, 72.0);
+            // NEW-2: iOS-style rubber-band resistance past trigger point
+            final raw = (_dragOffset + delta).clamp(0.0, 120.0);
+            _dragOffset = _rubberBand(raw);
             if (_dragOffset > 44 && !_didTriggerHaptic) {
               _didTriggerHaptic = true;
               HapticFeedback.lightImpact();
@@ -2156,6 +2405,9 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
                   docId: widget.docId,
                   isTailMessage: widget.isTailMessage,
                   isClusterMember: widget.isClusterMember,
+                  // NEW-5: Pass jump-to-reply and highlight state
+                  onJumpToMessage: widget.onJumpToMessage,
+                  isHighlighted: widget.isHighlighted,
                 ),
               ),
             ),
@@ -2179,6 +2431,10 @@ class _ChatBubble extends StatelessWidget {
   final String docId;
   final bool isTailMessage;
   final bool isClusterMember;
+  // NEW-5: Jump to replied message callback
+  final void Function(String msgKeyId)? onJumpToMessage;
+  // NEW-5: Whether this bubble is highlighted from jump-to-reply
+  final bool isHighlighted;
 
   const _ChatBubble({
     required this.data,
@@ -2190,6 +2446,8 @@ class _ChatBubble extends StatelessWidget {
     required this.docId,
     required this.isTailMessage,
     this.isClusterMember = false,
+    this.onJumpToMessage,
+    this.isHighlighted = false,
   });
 
   @override
@@ -2201,10 +2459,84 @@ class _ChatBubble extends StatelessWidget {
     final isMediaOnly = ['image', 'video', 'audio', 'file'].contains(type) &&
         (data['text'] as String? ?? '').isEmpty;
 
+    // NEW-3: Detect emoji-only messages for jumbo rendering
+    final emojiOnly = type == null && !isDeleted && _isEmojiOnly(data['text'] ?? '');
+
     // Tight 2px padding within a cluster, 8px between clusters
     final verticalPad = isClusterMember && !isTailMessage ? 1.0 : 4.0;
 
-    return Padding(
+    // NEW-3: Emoji-only messages render without bubble background
+    if (emojiOnly) {
+      return Padding(
+        padding: EdgeInsets.only(
+          top: verticalPad,
+          bottom: (reactions != null && reactions.isNotEmpty) ? 14.0 : verticalPad,
+          left: isOutgoing ? 80 : 0,
+          right: isOutgoing ? 0 : 80,
+        ),
+        child: Row(
+          mainAxisAlignment: isOutgoing ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Column(
+                  crossAxisAlignment: isOutgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Reply preview (still renders without bubble bg)
+                    if (replyTo != null)
+                      Container(
+                        constraints: BoxConstraints(
+                          maxWidth: math.min(MediaQuery.of(context).size.width * 0.75, 480),
+                        ),
+                        child: _ReplyPreviewInBubble(
+                          replyTo: replyTo,
+                          isOutgoing: isOutgoing,
+                          onTap: () => onJumpToMessage?.call(replyTo['msgKeyId'] ?? ''),
+                        ),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        data['text'] ?? '',
+                        style: const TextStyle(fontSize: 42),
+                      ),
+                    ),
+                    Padding(
+                      padding: EdgeInsets.only(
+                        top: 2,
+                        right: isOutgoing ? 4 : 0,
+                        left: isOutgoing ? 0 : 4,
+                      ),
+                      child: _TimeRow(
+                        time: time,
+                        isOutgoing: isOutgoing,
+                        deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
+                        docId: docId,
+                        data: data,
+                        overlayOnMedia: false,
+                      ),
+                    ),
+                  ],
+                ),
+                // Reactions
+                if (reactions != null && reactions.isNotEmpty)
+                  Positioned(
+                    bottom: -12,
+                    right: isOutgoing ? 6 : null,
+                    left: isOutgoing ? null : 6,
+                    child: _ReactionsRow(reactions: reactions, context: context),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+    // NEW-5: Wrap bubble in highlight container for jump-to-reply flash
+    Widget bubbleContent = Padding(
       padding: EdgeInsets.only(
         top: verticalPad,
         bottom: (reactions != null && reactions.isNotEmpty) ? 14.0 : verticalPad,
@@ -2215,147 +2547,146 @@ class _ChatBubble extends StatelessWidget {
         mainAxisAlignment: isOutgoing ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          Stack(
-            clipBehavior: Clip.none,
-            children: [
-              // ── The bubble itself ──
-              Container(
-                constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.75,
-                ),
-                decoration: BoxDecoration(
-                  color: CupertinoDynamicColor.resolve(
-                    isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor,
-                    context,
+          Flexible(
+            fit: FlexFit.loose,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                // ── The bubble itself (unified custom painter) ──
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    // POLISH-3: Cap max width at 480 for large screens
+                    maxWidth: math.min(MediaQuery.of(context).size.width * 0.75, 480),
                   ),
-                  borderRadius: _bubbleRadius(isOutgoing, isTailMessage),
-                  boxShadow: [
-                    BoxShadow(
-                      color: CupertinoColors.black.withValues(alpha: 0.07),
-                      blurRadius: 4,
-                      offset: const Offset(0, 1.5),
+                  child: CustomPaint(
+                    painter: _BubbleWithTailPainter(
+                      isOutgoing: isOutgoing,
+                      isTail: isTailMessage,
+                      color: CupertinoDynamicColor.resolve(
+                        isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor,
+                        context,
+                      ),
                     ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: _bubbleRadius(isOutgoing, isTailMessage),
-                  child: Padding(
-                    padding: _bubblePadding(type, isMediaOnly),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Group sender name (inside bubble, Telegram style)
-                        if (isGroup && !isOutgoing && senderName.isNotEmpty && !isDeleted)
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            widthFactor: 1.0,
-                            child: Padding(
-                              padding: const EdgeInsets.only(bottom: 3),
-                              child: Text(
-                                senderName,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: -0.4,
-                                  color: senderColor,
+                    child: Padding(
+                      // Add extra padding on the tail side so content doesn't overlap the tail
+                      padding: EdgeInsets.only(
+                        left: isOutgoing ? 0 : (isTailMessage ? 6 : 0),
+                        right: isOutgoing ? (isTailMessage ? 6 : 0) : 0,
+                      ),
+                      child: ClipRRect(
+                        borderRadius: _bubbleRadius(isOutgoing, isTailMessage),
+                        child: Padding(
+                          padding: _bubblePadding(type, isMediaOnly),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Group sender name (inside bubble, Telegram style)
+                              // Only show for the visually topmost (oldest) message in a cluster
+                              if (isGroup && !isOutgoing && senderName.isNotEmpty && !isDeleted && !isClusterMember)
+                                Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  widthFactor: 1.0,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(bottom: 3),
+                                    child: Text(
+                                      senderName,
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: -0.3,
+                                        color: senderColor,
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                          ),
-                        // Reply preview
-                        if (replyTo != null && !isDeleted)
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            widthFactor: 1.0,
-                            child: _ReplyPreviewInBubble(
-                              replyTo: replyTo,
-                              isOutgoing: isOutgoing,
-                            ),
-                          ),
-                        // Content + Time — inline for text, stacked for media
-                        if (type == 'text' || type == null || (!isMediaOnly && !isDeleted))
-                          // Text messages: Wrap lets time sit inline after short text
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            widthFactor: 1.0,
-                            child: Wrap(
-                              alignment: WrapAlignment.end,
-                              crossAxisAlignment: WrapCrossAlignment.end,
-                              spacing: 4,
-                              runSpacing: 0,
-                              children: [
-                                _buildContent(context, type, isDeleted, isMediaOnly),
+                              // Reply preview
+                              if (replyTo != null && !isDeleted)
+                                Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  widthFactor: 1.0,
+                                  // NEW-5: Pass onTap for jump-to-reply
+                                  child: _ReplyPreviewInBubble(
+                                    replyTo: replyTo,
+                                    isOutgoing: isOutgoing,
+                                    onTap: () => onJumpToMessage?.call(replyTo['msgKeyId'] ?? ''),
+                                  ),
+                                ),
+                              // Content + Time — inline for text, stacked for media
+                              if (type == 'text' || type == null || (!isMediaOnly && !isDeleted))
+                                // Text messages: Stack trick for inline timestamp
+                                Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  widthFactor: 1.0,
+                                  child: Stack(
+                                    children: [
+                                      _buildContent(context, type, isDeleted, isMediaOnly),
+                                      Positioned(
+                                        bottom: 0,
+                                        right: 0,
+                                        child: _TimeRow(
+                                          time: time,
+                                          isOutgoing: isOutgoing,
+                                          deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
+                                          docId: docId,
+                                          data: data,
+                                          overlayOnMedia: false,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              else ...[
+                                // Media messages: stacked layout
+                                Align(
+                                  alignment: AlignmentDirectional.centerStart,
+                                  widthFactor: 1.0,
+                                  child: _buildContent(context, type, isDeleted, isMediaOnly),
+                                ),
+                                // Time + ticks (right-aligned by Column's crossAxisAlignment)
                                 Padding(
-                                  padding: const EdgeInsets.only(bottom: 1),
+                                  padding: isMediaOnly
+                                      ? EdgeInsets.zero
+                                      : const EdgeInsets.only(top: 3),
                                   child: _TimeRow(
                                     time: time,
                                     isOutgoing: isOutgoing,
                                     deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
                                     docId: docId,
                                     data: data,
-                                    overlayOnMedia: false,
+                                    overlayOnMedia: isMediaOnly && type == 'image',
                                   ),
                                 ),
                               ],
-                            ),
-                          )
-                        else ...[
-                          // Media messages: stacked layout
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            widthFactor: 1.0,
-                            child: _buildContent(context, type, isDeleted, isMediaOnly),
+                            ],
                           ),
-                          // Time + ticks (right-aligned by Column's crossAxisAlignment)
-                          Padding(
-                            padding: isMediaOnly
-                                ? EdgeInsets.zero
-                                : const EdgeInsets.only(top: 3),
-                            child: _TimeRow(
-                              time: time,
-                              isOutgoing: isOutgoing,
-                              deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
-                              docId: docId,
-                              data: data,
-                              overlayOnMedia: isMediaOnly && type == 'image',
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              // ── Bubble tail ──
-              if (isTailMessage)
-                Positioned(
-                  bottom: 0,
-                  left: isOutgoing ? null : -8,
-                  right: isOutgoing ? -8 : null,
-                  child: CustomPaint(
-                    painter: _BubbleTailPainter(
-                      isOutgoing: isOutgoing,
-                      color: CupertinoDynamicColor.resolve(
-                        isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor,
-                        context,
+                        ),
                       ),
                     ),
-                    size: const Size(12, 16),
                   ),
                 ),
-              // ── Reactions ──
-              if (reactions != null && reactions.isNotEmpty)
-                Positioned(
-                  bottom: -12,
-                  right: isOutgoing ? 6 : null,
-                  left: isOutgoing ? null : 6,
-                  child: _ReactionsRow(reactions: reactions, context: context),
-                ),
-            ],
+                // ── Reactions ──
+                if (reactions != null && reactions.isNotEmpty)
+                  Positioned(
+                    bottom: -12,
+                    right: isOutgoing ? 6 : null,
+                    left: isOutgoing ? null : 6,
+                    child: _ReactionsRow(reactions: reactions, context: context),
+                  ),
+              ],
+            ),
           ),
         ],
       ),
+    );
+
+    // NEW-5: Apply highlight animation if jumped to
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      color: isHighlighted
+          ? CupertinoColors.systemBlue.withValues(alpha: 0.18)
+          : CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.0),
+      child: bubbleContent,
     );
   }
 
@@ -2429,6 +2760,7 @@ class _ChatBubble extends StatelessWidget {
           mediaUrl: url,
           caption: data['text'] as String? ?? '',
           isOutgoing: isOutgoing,
+          data: data, // NEW-7 pass metadata
         );
       case 'video':
         return _VideoContent(
@@ -2459,6 +2791,137 @@ class _ChatBubble extends StatelessWidget {
 // ─────────────────────────────────────────────
 //  BUBBLE TAIL PAINTER
 // ─────────────────────────────────────────────
+// FIX-5: Unified bubble tail painter for perfect anti-aliasing
+class _BubbleWithTailPainter extends CustomPainter {
+  final bool isOutgoing;
+  final bool isTail;
+  final Color color;
+
+  const _BubbleWithTailPainter({
+    required this.isOutgoing,
+    required this.isTail,
+    required this.color,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    
+    final path = Path();
+    const r = 18.0;
+    const rSmall = 4.0;
+    
+    // Bounds for the main rounded rectangle (leaving room for tail if needed)
+    final mainRect = Rect.fromLTRB(
+      isOutgoing || !isTail ? 0 : 6.0, 
+      0, 
+      isOutgoing && isTail ? size.width - 6.0 : size.width, 
+      size.height
+    );
+
+    if (!isTail) {
+      path.addRRect(RRect.fromRectAndRadius(mainRect, const Radius.circular(r)));
+    } else {
+      if (isOutgoing) {
+        // Main rounded rect minus bottom right
+        path.addRRect(RRect.fromRectAndCorners(
+          mainRect,
+          topLeft: const Radius.circular(r),
+          topRight: const Radius.circular(r),
+          bottomLeft: const Radius.circular(r),
+          bottomRight: const Radius.circular(rSmall),
+        ));
+        
+        // Add the organic tail on the right
+        final w = mainRect.right;
+        final h = mainRect.bottom;
+        path.moveTo(w, h - rSmall);
+        path.cubicTo(
+          w, h - 2,
+          w + 1, h,
+          w + 8, h,
+        );
+        path.cubicTo(
+          w + 4, h,
+          w + 1, h - 4,
+          w, h - 16,
+        );
+      } else {
+        // Main rounded rect minus bottom left
+        path.addRRect(RRect.fromRectAndCorners(
+          mainRect,
+          topLeft: const Radius.circular(r),
+          topRight: const Radius.circular(r),
+          bottomLeft: const Radius.circular(rSmall),
+          bottomRight: const Radius.circular(r),
+        ));
+        
+        // Add the organic tail on the left
+        final w = mainRect.left;
+        final h = mainRect.bottom;
+        path.moveTo(w, h - rSmall);
+        path.cubicTo(
+          w, h - 2,
+          w - 1, h,
+          w - 8, h,
+        );
+        path.cubicTo(
+          w - 4, h,
+          w - 1, h - 4,
+          w, h - 16,
+        );
+      }
+    }
+
+    // Shadow
+    canvas.drawShadow(
+      path,
+      CupertinoColors.black.withValues(alpha: 0.2),
+      2.0,
+      false,
+    );
+    
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_BubbleWithTailPainter old) {
+    return old.color != color || old.isOutgoing != isOutgoing || old.isTail != isTail;
+  }
+}
+
+class _TelegramSendArrowPainter extends CustomPainter {
+  final Color color;
+  const _TelegramSendArrowPainter(this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 2.4
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+
+    final path = Path();
+    // Short stem, wide head
+    path.moveTo(size.width / 2, size.height * 0.9);
+    path.lineTo(size.width / 2, size.height * 0.1);
+    
+    path.moveTo(size.width * 0.15, size.height * 0.45);
+    path.lineTo(size.width / 2, size.height * 0.1);
+    path.lineTo(size.width * 0.85, size.height * 0.45);
+    
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// Keep the old one for the typing bubble
 class _BubbleTailPainter extends CustomPainter {
   final bool isOutgoing;
   final Color color;
@@ -2534,8 +2997,20 @@ class _TimeRow extends StatelessWidget {
       children: [
         Text(
           time,
-          style: TextStyle(fontSize: 11, color: timeColor),
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w400, color: timeColor),
         ),
+        // POLISH-4: Show 'edited' label if message was edited
+        if (data['edited'] == true) ...[
+          const SizedBox(width: 3),
+          Text(
+            'edited',
+            style: TextStyle(
+              fontSize: 12,
+              color: timeColor.withValues(alpha: 0.75),
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
         // FIX: Delivery ticks only appear on outgoing messages.
         // Incoming messages only need the timestamp.
         if (isOutgoing) ...[
@@ -2581,15 +3056,23 @@ class _DeliveryTick extends StatelessWidget {
     switch (status) {
       case 'read':
       case 'played':
-        return Text('✓✓',
-            style: TextStyle(
-                fontSize: 12, color: readColor, fontWeight: FontWeight.w600, letterSpacing: -2));
+        // POLISH-2: Custom painted double tick (read)
+        return SizedBox(
+          width: 22, height: 12,
+          child: CustomPaint(painter: _TickPainter(double_: true, color: readColor)),
+        );
       case 'delivered':
-        return Text('✓✓',
-            style: TextStyle(fontSize: 12, color: mutedColor, letterSpacing: -2));
+        // POLISH-2: Custom painted double tick (delivered)
+        return SizedBox(
+          width: 22, height: 12,
+          child: CustomPaint(painter: _TickPainter(double_: true, color: mutedColor)),
+        );
       case 'sent':
-        return Text('✓',
-            style: TextStyle(fontSize: 12, color: mutedColor));
+        // POLISH-2: Custom painted single tick
+        return SizedBox(
+          width: 14, height: 12,
+          child: CustomPaint(painter: _TickPainter(double_: false, color: mutedColor)),
+        );
       case 'error':
         return GestureDetector(
           onTap: () {
@@ -2622,12 +3105,77 @@ class _DeliveryTick extends StatelessWidget {
               color: CupertinoColors.systemRed, size: 14),
         );
       default: // pending
-        return Text('✓',
-            style: TextStyle(
-                fontSize: 12,
-                color: mutedColor.withValues(alpha: 0.6)));
+        // POLISH-2: Custom painted single tick (pending)
+        return SizedBox(
+          width: 14, height: 12,
+          child: CustomPaint(
+            painter: _TickPainter(double_: false, color: mutedColor.withValues(alpha: 0.6)),
+          ),
+        );
     }
   }
+}
+
+// ─────────────────────────────────────────────
+//  POLISH-2: CUSTOM TICK PAINTER
+// ─────────────────────────────────────────────
+class _TickPainter extends CustomPainter {
+  final bool double_;
+  final Color color;
+  _TickPainter({required this.double_, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..color = color
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.stroke;
+
+    // First tick (or only tick for single)
+    final offset = double_ ? -3.0 : 0.0;
+    final path1 = Path()
+      ..moveTo(size.width * 0.15 + offset, size.height * 0.52)
+      ..lineTo(size.width * 0.38 + offset, size.height * 0.75)
+      ..lineTo(size.width * 0.72 + offset, size.height * 0.25);
+    canvas.drawPath(path1, p);
+
+    if (double_) {
+      // Second tick (shifted right and slightly overlapping)
+      final path2 = Path()
+        ..moveTo(size.width * 0.35, size.height * 0.52)
+        ..lineTo(size.width * 0.58, size.height * 0.75)
+        ..lineTo(size.width * 0.92, size.height * 0.25);
+      canvas.drawPath(path2, p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_TickPainter old) =>
+      old.color != color || old.double_ != double_;
+}
+
+class _ThinChevron extends CustomPainter {
+  final Color color;
+  _ThinChevron(this.color);
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.5
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+    final path = Path()
+      ..moveTo(size.width * 0.65, size.height * 0.15)
+      ..lineTo(size.width * 0.25, size.height * 0.5)
+      ..lineTo(size.width * 0.65, size.height * 0.85);
+    canvas.drawPath(path, paint);
+  }
+  
+  @override
+  bool shouldRepaint(_ThinChevron old) => old.color != color;
 }
 
 // ─────────────────────────────────────────────
@@ -2668,17 +3216,19 @@ class _ReactionsRow extends StatelessWidget {
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: counts.entries.take(5).map((e) {
-          return Padding(
-            padding: const EdgeInsets.only(right: 3),
+        children: counts.entries.take(3).toList().asMap().entries.map((entry) {
+          final i = entry.key;
+          final e = entry.value;
+          return Transform.translate(
+            offset: Offset(i * -4.0, 0),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(e.key, style: const TextStyle(fontSize: 13)),
+                Text(e.key, style: const TextStyle(fontSize: 13.5)),
                 if (e.value > 1) ...[
-                  const SizedBox(width: 2),
+                  const SizedBox(width: 1),
                   Text('${e.value}',
-                      style: const TextStyle(fontSize: 11, color: CupertinoColors.systemGrey)),
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: CupertinoColors.systemGrey)),
                 ],
               ],
             ),
@@ -2695,7 +3245,8 @@ class _ReactionsRow extends StatelessWidget {
 class _ReplyPreviewInBubble extends StatelessWidget {
   final Map<String, dynamic> replyTo;
   final bool isOutgoing;
-  const _ReplyPreviewInBubble({required this.replyTo, required this.isOutgoing});
+  final VoidCallback? onTap;
+  const _ReplyPreviewInBubble({required this.replyTo, required this.isOutgoing, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -2724,14 +3275,14 @@ class _ReplyPreviewInBubble extends StatelessWidget {
 
     final accentColor = const Color(0xFF4A90D9);
     final bgColor = isOutgoing
-        ? const Color(0x22000000)
-        : CupertinoColors.systemGrey6.resolveFrom(context);
+        ? const Color(0x26000000) // rgba(0,0,0,0.15)
+        : const Color(0x12000000); // rgba(0,0,0,0.07)
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
+    Widget content = Container(
+      margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
         color: bgColor,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
         border: Border(
           left: BorderSide(color: accentColor, width: 3),
         ),
@@ -2750,8 +3301,8 @@ class _ReplyPreviewInBubble extends StatelessWidget {
                   Text(
                     displayAuthor,
                     style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
                       color: accentColor,
                       height: 1.2,
                     ),
@@ -2762,10 +3313,11 @@ class _ReplyPreviewInBubble extends StatelessWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 12.5,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w400,
                       color: isOutgoing
-                          ? _outgoingTextColor(context).withValues(alpha: 0.70)
-                          : CupertinoColors.secondaryLabel.resolveFrom(context),
+                          ? _outgoingTextColor(context).withValues(alpha: 0.60)
+                          : CupertinoColors.label.resolveFrom(context).withValues(alpha: 0.60),
                       height: 1.3,
                     ),
                   ),
@@ -2778,12 +3330,12 @@ class _ReplyPreviewInBubble extends StatelessWidget {
                 borderRadius: BorderRadius.circular(4),
                 child: CachedNetworkImage(
                   imageUrl: mediaUrl,
-                  width: 40,
-                  height: 40,
+                  width: 34,
+                  height: 34,
                   fit: BoxFit.cover,
                   errorWidget: (_, __, ___) => Container(
-                    width: 40,
-                    height: 40,
+                    width: 34,
+                    height: 34,
                     color: CupertinoColors.systemGrey5,
                     child: const Icon(CupertinoIcons.photo, size: 18, color: CupertinoColors.systemGrey),
                   ),
@@ -2794,6 +3346,15 @@ class _ReplyPreviewInBubble extends StatelessWidget {
         ),
       ),
     );
+
+    if (onTap != null) {
+      return GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: content,
+      );
+    }
+    return content;
   }
 }
 
@@ -2944,7 +3505,8 @@ class _ContextMenuItemState extends State<_ContextMenuItem> {
         color: _pressed
             ? CupertinoColors.systemGrey5.resolveFrom(context)
             : CupertinoColors.systemBackground.resolveFrom(context),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Row(
           children: [
             Expanded(
@@ -3042,44 +3604,33 @@ class _ScrollToBottomButton extends StatelessWidget {
         clipBehavior: Clip.none,
         children: [
           ClipRRect(
-            borderRadius: BorderRadius.circular(22),
+            borderRadius: BorderRadius.circular(18),
             child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
+              filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
                child: Container(
-                width: 44,
-                height: 44,
-                padding: const EdgeInsets.all(0.5),
+                width: 36,
+                height: 36,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(22),
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      CupertinoColors.white.withValues(alpha: 0.6),
-                      CupertinoColors.white.withValues(alpha: 0.05),
-                      CupertinoColors.white.withValues(alpha: 0.02),
-                      CupertinoColors.white.withValues(alpha: 0.3),
-                    ],
-                    stops: const [0.0, 0.3, 0.7, 1.0],
+                  borderRadius: BorderRadius.circular(18),
+                  color: CupertinoDynamicColor.resolve(
+                    const CupertinoDynamicColor.withBrightness(
+                      color: Color(0x94FFFFFF),
+                      darkColor: Color(0xAE2C2C2E),
+                    ),
+                    context,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: CupertinoColors.black.withValues(alpha: 0.12),
-                      blurRadius: 20,
-                      spreadRadius: -5,
+                      color: CupertinoColors.black.withValues(alpha: 0.15),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
                     ),
                   ],
                 ),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(22),
-                  ),
-                  child: Icon(
-                    CupertinoIcons.chevron_down,
-                    size: 22,
-                    color: CupertinoColors.systemBlue.resolveFrom(context),
-                  ),
+                child: Icon(
+                  CupertinoIcons.chevron_down,
+                  size: 20,
+                  color: CupertinoColors.systemBlue.resolveFrom(context),
                 ),
               ),
             ),
@@ -3224,13 +3775,21 @@ class _SendButtonState extends State<_SendButton> {
         duration: const Duration(milliseconds: 100),
         curve: Curves.easeOut,
         child: Container(
-          width: 38,
-          height: 38,
+          width: 33,
+          height: 33,
           decoration: const BoxDecoration(
             color: CupertinoColors.systemBlue,
             shape: BoxShape.circle,
           ),
-          child: const Icon(CupertinoIcons.arrow_up, color: CupertinoColors.white, size: 22),
+          child: Center(
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CustomPaint(
+                painter: _TelegramSendArrowPainter(CupertinoColors.white),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -3238,25 +3797,85 @@ class _SendButtonState extends State<_SendButton> {
 }
 
 // ─────────────────────────────────────────────
-//  MIC BUTTON
+//  MORPH SEND BUTTON (Rotational Spring)
 // ─────────────────────────────────────────────
-class _MicButton extends StatelessWidget {
-  const _MicButton({super.key});
+class _MorphSendButton extends StatefulWidget {
+  final bool hasText;
+  final VoidCallback onTap;
+
+  const _MorphSendButton({required this.hasText, required this.onTap});
+
+  @override
+  State<_MorphSendButton> createState() => _MorphSendButtonState();
+}
+
+class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _rotation;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+    _rotation = Tween<double>(begin: -math.pi / 2, end: 0.0).animate(
+      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
+    );
+    _scale = Tween<double>(begin: 0.8, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
+    );
+    if (widget.hasText) _controller.value = 1.0;
+  }
+
+  @override
+  void didUpdateWidget(_MorphSendButton old) {
+    super.didUpdateWidget(old);
+    if (widget.hasText != old.hasText) {
+      widget.hasText ? _controller.forward() : _controller.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 38,
-      height: 38,
-      decoration: const BoxDecoration(
-        color: CupertinoColors.systemBlue,
-        shape: BoxShape.circle,
-      ),
-      child: Center(
-        child: Image.asset(
-          'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
-          width: 20,
-          height: 20,
-          color: CupertinoColors.white,
+    return SpringScaleButton(
+      onTap: widget.hasText ? widget.onTap : null,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) => Transform.scale(
+          scale: _scale.value,
+          child: Transform.rotate(
+            angle: _rotation.value,
+            child: Container(
+              width: 33,
+              height: 33,
+              decoration: const BoxDecoration(
+                color: CupertinoColors.systemBlue,
+                shape: BoxShape.circle,
+              ),
+              child: Center(
+                child: _controller.value > 0.5
+                    ? SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CustomPaint(
+                          painter: _TelegramSendArrowPainter(CupertinoColors.white),
+                        ),
+                      )
+                    : Image.asset(
+                        'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
+                        width: 20,
+                        height: 20,
+                        color: CupertinoColors.white,
+                      ),
+              ),
+            ),
+          ),
         ),
       ),
     );
@@ -3293,25 +3912,26 @@ class _DateChip extends StatelessWidget {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(12),
           child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+            filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
               decoration: BoxDecoration(
-                color: CupertinoDynamicColor.resolve(
-                  const CupertinoDynamicColor.withBrightness(
-                    color: Color(0xCCF2F2F6),
-                    darkColor: Color(0xCC1C1C1E),
-                  ),
-                  context,
-                ),
-                borderRadius: BorderRadius.circular(12),
+                color: const Color(0x7A000000), // Semi-transparent dark for legibility
+                borderRadius: BorderRadius.circular(10), // tighter radius
+                boxShadow: [
+                  BoxShadow(
+                    color: CupertinoColors.black.withValues(alpha: 0.1),
+                    blurRadius: 4,
+                  )
+                ],
               ),
               child: Text(
                 _formatDate(date),
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: CupertinoColors.white,
+                  letterSpacing: -0.2,
                 ),
               ),
             ),
@@ -3333,18 +3953,30 @@ class _TextContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Append invisible trailing whitespace to push last line
+    // so the time widget overlaps it without covering real text
+    final paddedText = '$text\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          text,
+        SelectableLinkify(
+          text: paddedText,
+          onOpen: (link) => launchUrl(Uri.parse(link.url), mode: LaunchMode.externalApplication),
+          options: const LinkifyOptions(humanize: false),
           style: TextStyle(
-            fontSize: 16,
-            height: 1.2,
-            letterSpacing: -0.2,
+            fontSize: 17,
+            height: 1.3,
+            letterSpacing: -0.4,
             color: isOutgoing
                 ? _outgoingTextColor(context)
                 : CupertinoColors.label.resolveFrom(context),
+          ),
+          linkStyle: TextStyle(
+            color: isOutgoing
+                ? _outgoingTextColor(context)
+                : CupertinoColors.systemBlue,
+            decoration: TextDecoration.underline,
           ),
         ),
         if (linkPreview != null) ...[
@@ -3494,10 +4126,49 @@ class _ImageContent extends StatelessWidget {
   final String mediaUrl;
   final String caption;
   final bool isOutgoing;
-  const _ImageContent({required this.mediaUrl, required this.caption, required this.isOutgoing});
+  // NEW-7: Pass full data to access mediaWidth/mediaHeight
+  final Map<String, dynamic> data;
+  
+  const _ImageContent({
+    required this.mediaUrl,
+    required this.caption,
+    required this.isOutgoing,
+    required this.data,
+  });
+
+  // NEW-7: Computes display size keeping aspect ratio within max bounds
+  Size _imageDisplaySize(double? w, double? h) {
+    const double maxW = 260.0;
+    const double maxH = 320.0;
+    const double minW = 120.0;
+    const double minH = 120.0;
+
+    if (w == null || h == null || w == 0 || h == 0) {
+      // Default fallback size if no metadata
+      return const Size(maxW, maxH);
+    }
+
+    final double aspect = w / h;
+    double calcW = maxW;
+    double calcH = calcW / aspect;
+
+    if (calcH > maxH) {
+      calcH = maxH;
+      calcW = calcH * aspect;
+    }
+
+    return Size(
+      calcW.clamp(minW, maxW),
+      calcH.clamp(minH, maxH),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final double? origW = (data['mediaWidth'] as num?)?.toDouble();
+    final double? origH = (data['mediaHeight'] as num?)?.toDouble();
+    final Size displaySize = _imageDisplaySize(origW, origH);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -3508,27 +4179,22 @@ class _ImageContent extends StatelessWidget {
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 260, maxHeight: 320, minHeight: 120),
+            child: SizedBox(
+              width: displaySize.width,
+              height: displaySize.height,
               child: Stack(
+                fit: StackFit.expand,
                 children: [
                   CachedNetworkImage(
                     imageUrl: mediaUrl,
                     fit: BoxFit.cover,
-                    width: double.infinity,
-                    placeholder: (_, __) => const SizedBox(
-                      height: 180,
-                      child: Center(child: CupertinoActivityIndicator()),
-                    ),
-                    errorWidget: (_, __, ___) => SizedBox(
-                      height: 180,
-                      child: Center(
-                        child: Icon(CupertinoIcons.photo,
-                            size: 40,
-                            color: isOutgoing
-                                ? CupertinoColors.white.withValues(alpha: 0.6)
-                                : CupertinoColors.systemGrey),
-                      ),
+                    placeholder: (_, __) => const Center(child: CupertinoActivityIndicator()),
+                    errorWidget: (_, __, ___) => Center(
+                      child: Icon(CupertinoIcons.photo,
+                          size: 40,
+                          color: isOutgoing
+                              ? CupertinoColors.white.withValues(alpha: 0.6)
+                              : CupertinoColors.systemGrey),
                     ),
                   ),
                   // FIX: The time overlay was an empty Container with no child — nothing rendered.
@@ -3863,7 +4529,7 @@ class _FileContent extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
-//  TYPING INDICATOR
+//  TELEGRAM TYPING INDICATOR (Staggered dots)
 // ─────────────────────────────────────────────
 class _TypingIndicator extends StatefulWidget {
   const _TypingIndicator();
@@ -3871,56 +4537,47 @@ class _TypingIndicator extends StatefulWidget {
   State<_TypingIndicator> createState() => _TypingIndicatorState();
 }
 
-class _TypingIndicatorState extends State<_TypingIndicator> with TickerProviderStateMixin {
-  late List<AnimationController> _controllers;
-  late List<Animation<double>> _animations;
+class _TypingIndicatorState extends State<_TypingIndicator> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
 
   @override
   void initState() {
     super.initState();
-    _controllers = List.generate(
-      3,
-      (_) => AnimationController(vsync: this, duration: const Duration(milliseconds: 500)),
-    );
-    _animations = _controllers
-        .map((c) => Tween(begin: 0.0, end: -5.0)
-            .animate(CurvedAnimation(parent: c, curve: Curves.easeInOut)))
-        .toList();
-    for (int i = 0; i < 3; i++) {
-      Future.delayed(Duration(milliseconds: i * 160), () {
-        if (mounted) _controllers[i].repeat(reverse: true);
-      });
-    }
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 1000))..repeat();
   }
 
   @override
   void dispose() {
-    for (final c in _controllers) c.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final color = CupertinoColors.secondaryLabel.resolveFrom(context);
     return Row(
       mainAxisSize: MainAxisSize.min,
-      children: List.generate(
-        3,
-        (i) => AnimatedBuilder(
-          animation: _animations[i],
-          builder: (_, __) => Transform.translate(
-            offset: Offset(0, _animations[i].value),
-            child: Container(
-              width: 7,
-              height: 7,
-              margin: const EdgeInsets.symmetric(horizontal: 2.5),
-              decoration: BoxDecoration(
-                color: CupertinoColors.systemGrey.resolveFrom(context),
-                shape: BoxShape.circle,
+      children: List.generate(3, (i) {
+        return AnimatedBuilder(
+          animation: _controller,
+          builder: (context, child) {
+            final delay = i * 0.2;
+            final t = (_controller.value + delay) % 1.0;
+            final offset = math.sin(t * math.pi * 2) * 2;
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1.5),
+              child: Transform.translate(
+                offset: Offset(0, offset),
+                child: Container(
+                  width: 4,
+                  height: 4,
+                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                ),
               ),
-            ),
-          ),
-        ),
-      ),
+            );
+          },
+        );
+      }),
     );
   }
 }
@@ -3954,7 +4611,7 @@ class _PresenceSubtitle extends StatelessWidget {
         if (text.isEmpty) return const SizedBox.shrink();
         return Text(
           text,
-          style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w400, letterSpacing: -0.1),
+          style: TextStyle(fontSize: 13, color: color, fontWeight: FontWeight.w400, letterSpacing: -0.1),
         );
       },
     );
@@ -4124,3 +4781,181 @@ class _VideoPlayerPageState extends State<_VideoPlayerPage> {
     );
   }
 }
+
+// ─────────────────────────────────────────────
+//  SPRING PHYSICS UTILITY
+// ─────────────────────────────────────────────
+class SpringCurve extends Curve {
+  final SpringDescription spring;
+  const SpringCurve(this.spring);
+
+  @override
+  double transform(double t) {
+    final sim = SpringSimulation(spring, 0, 1, 0);
+    return sim.x(t).clamp(0.0, 1.0);
+  }
+}
+
+// ─────────────────────────────────────────────
+//  TELEGRAM BUBBLE ENTRANCE (Velocity Pop)
+// ─────────────────────────────────────────────
+class _TelegramBubbleEntrance extends StatefulWidget {
+  final Widget child;
+  final bool isOutgoing;
+  const _TelegramBubbleEntrance({super.key, required this.child, required this.isOutgoing});
+
+  @override
+  State<_TelegramBubbleEntrance> createState() => _TelegramBubbleEntranceState();
+}
+
+class _TelegramBubbleEntranceState extends State<_TelegramBubbleEntrance> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _scale;
+  late final Animation<double> _drift;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
+    _scale = Tween<double>(begin: 0.6, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kBounceSpring)),
+    );
+    _drift = Tween<double>(begin: widget.isOutgoing ? 40.0 : -40.0, end: 0.0).animate(
+      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
+    );
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) => Opacity(
+        opacity: _controller.value.clamp(0.0, 1.0),
+        child: Transform.scale(
+          scale: _scale.value,
+          child: Transform.translate(
+            offset: Offset(_drift.value, 0),
+            child: child,
+          ),
+        ),
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+//  SPRING SCROLL BUTTON (Scroll-to-bottom)
+// ─────────────────────────────────────────────
+class _SpringScrollButton extends StatefulWidget {
+  final bool visible;
+  final int unreadCount;
+  final VoidCallback onTap;
+
+  const _SpringScrollButton({
+    required this.visible,
+    required this.unreadCount,
+    required this.onTap,
+  });
+
+  @override
+  State<_SpringScrollButton> createState() => _SpringScrollButtonState();
+}
+
+class _SpringScrollButtonState extends State<_SpringScrollButton> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
+    _scale = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kBounceSpring)),
+    );
+    if (widget.visible) _controller.value = 1.0;
+  }
+
+  @override
+  void didUpdateWidget(_SpringScrollButton old) {
+    super.didUpdateWidget(old);
+    if (widget.visible != old.visible) {
+      widget.visible ? _controller.forward() : _controller.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) => Transform.scale(
+        scale: _scale.value,
+        child: _ScrollToBottomButton(
+          unreadCount: widget.unreadCount,
+          onTap: widget.onTap,
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+//  SPRING SCALE BUTTON (Physics feedback)
+// ─────────────────────────────────────────────
+class SpringScaleButton extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  const SpringScaleButton({super.key, required this.child, this.onTap});
+
+  @override
+  State<SpringScaleButton> createState() => _SpringScaleButtonState();
+}
+
+class _SpringScaleButtonState extends State<SpringScaleButton> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 150));
+    _scale = Tween<double>(begin: 1.0, end: 0.94).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _controller.forward(),
+      onTapUp: (_) => _controller.reverse(),
+      onTapCancel: () => _controller.reverse(),
+      onTap: widget.onTap,
+      child: ScaleTransition(scale: _scale, child: widget.child),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+//  KEYBOARD HEIGHT OBSERVER (REMOVED - Using MediaQuery now)
+// ─────────────────────────────────────────────
+
