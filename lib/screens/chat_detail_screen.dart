@@ -802,29 +802,61 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ),
           ),
 
-          // LAYER 2: Nav bar blur overlay (top)
+          // LAYER 2: Top scrim gradient (content darkening under nav)
           Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: ClipRect(
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                child: Container(
-                  height: topPad + _kNavBarH,
-                  color: CupertinoDynamicColor.resolve(
-                    const CupertinoDynamicColor.withBrightness(
-                      color: Color(0xCDF2F2F7),  // light frosted
-                      darkColor: Color(0xE01C1C1E),  // dark frosted
-                    ),
-                    context,
+            top: 0, left: 0, right: 0,
+            height: topPad + _kNavBarH + 32,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xF0F2F2F7),   // nearly opaque light
+                          darkColor: Color(0xE8000000), // nearly opaque dark
+                        ),
+                        context,
+                      ),
+                      const Color(0x00000000),
+                    ],
+                    stops: const [0.0, 1.0],
                   ),
                 ),
               ),
             ),
           ),
 
-          // LAYER 2b: Nav pills (on top of blur)
+          // LAYER 3: Bottom scrim gradient (content darkening under input)
+          Positioned(
+            bottom: 0, left: 0, right: 0,
+            height: bottomPad + _kBottomBarEstH + 48,
+            child: IgnorePointer(
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xF0F2F2F7),
+                          darkColor: Color(0xE8000000),
+                        ),
+                        context,
+                      ),
+                      const Color(0x00000000),
+                    ],
+                    stops: const [0.0, 1.0],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // LAYER 4: Nav pills (transparent bar, individual pill blur)
           Positioned(
             top: topPad + (_kNavBarH - 32) / 2,
             left: 8,
@@ -837,7 +869,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ),
           ),
 
-          // LAYER 3: Pinned Bar
+          // LAYER 5: Pinned Bar
           Positioned(
             top: topPad + _kNavBarH + 4,
             left: 20,
@@ -845,26 +877,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             child: _buildPinnedBanner(),
           ),
 
-          // LAYER 4: Bottom bar blur overlay + input
+          // LAYER 6: Bottom bar (transparent, pills blur individually)
           Positioned(
             bottom: 0,
             left: 0,
             right: 0,
-            child: ClipRect(
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-                child: Container(
-                  color: CupertinoDynamicColor.resolve(
-                    const CupertinoDynamicColor.withBrightness(
-                      color: Color(0xCDF2F2F7),
-                      darkColor: Color(0xE01C1C1E),
-                    ),
-                    context,
-                  ),
-                  child: _buildBottomBar(),
-                ),
-              ),
-            ),
+            child: _buildBottomBar(),
           ),
         ],
       ),
@@ -875,48 +893,29 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  NAV BAR  (Telegram-style)
   // ─────────────────────────────────────────────
   // ─ Saturation boost matrix (1.7×) for glass vibrancy ─
-  static const _kGlassSaturation = ColorFilter.matrix(<double>[
-    0.4124, 0.3576, 0.1805, 0, 0,
-    0.2126, 0.7152, 0.0722, 0, 0,
-    0.0193, 0.1192, 0.9505, 0, 0,
-    0,      0,      0,      1, 0,
-  ]);
+  // ─ Saturation boost matrix removed — no longer needed ─
 
   // ─────────────────────────────────────────────
   //  LIQUID GLASS PILL — shared container
   // ─────────────────────────────────────────────
   Widget _buildLiquidPill({required Widget child}) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
+      borderRadius: BorderRadius.circular(20),
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 40, sigmaY: 40),
-        child: ColorFiltered(
-          colorFilter: _kGlassSaturation,
-          child: Container(
-            padding: const EdgeInsets.all(0.5), // Specular border reflection
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  CupertinoColors.white.withValues(alpha: 0.6),
-                  CupertinoColors.white.withValues(alpha: 0.05),
-                  CupertinoColors.white.withValues(alpha: 0.02),
-                  CupertinoColors.white.withValues(alpha: 0.3),
-                ],
-                stops: const [0.0, 0.3, 0.7, 1.0],
+        filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: CupertinoDynamicColor.resolve(
+              const CupertinoDynamicColor.withBrightness(
+                color: Color(0x94FFFFFF),
+                darkColor: Color(0xAE2C2C2E),
               ),
+              context,
             ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(23.5),
-              ),
-              child: child,
-            ),
+            borderRadius: BorderRadius.circular(20),
           ),
+          child: child,
         ),
       ),
     );
@@ -928,8 +927,15 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   Widget _buildNavBar() {
     final pillColor = CupertinoDynamicColor.resolve(
       const CupertinoDynamicColor.withBrightness(
-        color: Color(0xB8FFFFFF),   // white frosted 0.72
-        darkColor: Color(0xD92C2C2E), // dark frosted 0.85
+        color: Color(0x94FFFFFF),   // white @ 0.58
+        darkColor: Color(0xAE2C2C2E), // charcoal @ 0.68
+      ),
+      context,
+    );
+    final iconPillColor = CupertinoDynamicColor.resolve(
+      const CupertinoDynamicColor.withBrightness(
+        color: Color(0x85FFFFFF),   // white @ 0.52
+        darkColor: Color(0x9E2C2C2E), // charcoal @ 0.62
       ),
       context,
     );
@@ -1038,7 +1044,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         _NavPressablePill(
           height: 34,
           radius: 17,
-          color: pillColor,
+          color: iconPillColor,
           onTap: () => showCupertinoDialog(
             context: context,
             builder: (ctx) => CupertinoAlertDialog(
@@ -1063,7 +1069,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         _NavPressablePill(
           height: 34,
           radius: 17,
-          color: pillColor,
+          color: iconPillColor,
           onTap: () => showCupertinoDialog(
             context: context,
             builder: (ctx) => CupertinoAlertDialog(
@@ -1345,9 +1351,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             padding: EdgeInsets.fromLTRB(
               4,
-              _kBottomBarEstH + MediaQuery.of(context).padding.bottom + 8,
+              _kBottomBarEstH + MediaQuery.of(context).padding.bottom + 80,  // visual bottom (reverse top)
               4,
-              _kNavBarH + MediaQuery.of(context).padding.top + 8,
+              _kNavBarH + MediaQuery.of(context).padding.top + 64,           // visual top (reverse bottom)
             ),
             itemCount: docs.length,
             itemBuilder: (context, index) {
@@ -1607,24 +1613,28 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           child: _replyingTo != null
               ? KeyedSubtree(
                   key: const ValueKey('reply_banner'),
-                  child: Container(
-                    margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
-                    padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                    decoration: BoxDecoration(
-                      color: CupertinoDynamicColor.resolve(
-                        const CupertinoDynamicColor.withBrightness(
-                          color: Color(0xE0FFFFFF),   // near-white 0.88
-                          darkColor: Color(0xEB2C2C2E), // dark 0.92
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: BackdropFilter(
+                      filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                      child: Container(
+                        margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
+                        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                        decoration: BoxDecoration(
+                          color: CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0xD1FFFFFF),   // white @ 0.82
+                              darkColor: Color(0xE02C2C2E), // charcoal @ 0.88
+                            ),
+                            context,
+                          ),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: CupertinoColors.separator.resolveFrom(context),
+                            width: 0.5,
+                          ),
                         ),
-                        context,
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: CupertinoColors.separator.resolveFrom(context),
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Row(
+                        child: Row(
                       children: [
                         // Blue accent bar
                         Container(
@@ -1651,7 +1661,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                _replyingTo!['body'] ?? '',
+                                _replyingTo!['text'] ?? '',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -1674,6 +1684,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ),
                       ],
                     ),
+                      ),
+                    ),
                   ),
                 )
               : const SizedBox.shrink(),
@@ -1689,23 +1701,29 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 padding: const EdgeInsets.only(bottom: 2),
                 child: GestureDetector(
                   onTap: _pickAndSendMedia,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: CupertinoDynamicColor.resolve(
-                        const CupertinoDynamicColor.withBrightness(
-                          color: Color(0xB8FFFFFF),
-                          darkColor: Color(0xD92C2C2E),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: BackdropFilter(
+                      filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0x85FFFFFF),   // white @ 0.52
+                              darkColor: Color(0x9E2C2C2E), // charcoal @ 0.62
+                            ),
+                            context,
+                          ),
+                          shape: BoxShape.circle,
                         ),
-                        context,
+                        child: Icon(
+                          CupertinoIcons.add_circled,
+                          size: 22,
+                          color: CupertinoColors.systemBlue.resolveFrom(context),
+                        ),
                       ),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      CupertinoIcons.add_circled,
-                      size: 22,
-                      color: CupertinoColors.systemBlue.resolveFrom(context),
                     ),
                   ),
                 ),
@@ -1713,13 +1731,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               const SizedBox(width: 6),
               // Text field — frosted pill
               Expanded(
-                child: Container(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(22),
+                  child: BackdropFilter(
+                    filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+                    child: Container(
                   constraints: const BoxConstraints(maxHeight: 140),
                   decoration: BoxDecoration(
                     color: CupertinoDynamicColor.resolve(
                       const CupertinoDynamicColor.withBrightness(
-                        color: Color(0xE6FFFFFF),   // white 0.90
-                        darkColor: Color(0xEB2C2C2E), // dark 0.92
+                        color: Color(0xB8FFFFFF),   // white @ 0.72
+                        darkColor: Color(0xC72C2C2E), // charcoal @ 0.78
                       ),
                       context,
                     ),
@@ -1783,6 +1805,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ),
                       ),
                     ],
+                  ),
+                ),
                   ),
                 ),
               ),
@@ -2014,7 +2038,6 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
   late AnimationController _swipeAnim;
   bool _didTriggerHaptic = false;
   double _dragOffset = 0;
-  double _animStart = 0;
   Offset _lastTapPosition = Offset.zero;
 
   @override
@@ -2033,21 +2056,15 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
   }
 
   void _springBack(double velocity) {
-    // 1. Define the spring: frequency and damping.
-    // damping: 1.0 is critically damped, < 1.0 has a bit of "bounce".
+    final start = _dragOffset; // capture before reset
     final spring = SpringDescription(
       mass: 1,
-      stiffness: 500, // Telegram-spec weighted feel
-      damping: 30,    // Balanced oscillation
+      stiffness: 500,
+      damping: 30,
     );
-    
-    // 2. Create the simulation starting from current offset to 0
-    final simulation = SpringSimulation(spring, _dragOffset, 0, velocity);
-    
-    // 3. Drive the animation using the simulation
+    final simulation = SpringSimulation(spring, start, 0, velocity);
     _swipeAnim.animateWith(simulation);
-    
-    _dragOffset = 0;
+    // Do NOT reset _dragOffset here — let the animation drive value from start → 0
     _didTriggerHaptic = false;
   }
 
@@ -2987,16 +3004,22 @@ class _NavPressablePillState extends State<_NavPressablePill> {
         scale: _scale,
         duration: const Duration(milliseconds: 100),
         curve: Curves.easeOut,
-        child: Container(
-          height: widget.height,
-          constraints: BoxConstraints(minWidth: widget.height),
-          padding: EdgeInsets.symmetric(horizontal: widget.radius * 0.5),
-          decoration: BoxDecoration(
-            color: widget.color,
-            borderRadius: BorderRadius.circular(widget.radius),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(widget.radius),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+            child: Container(
+              height: widget.height,
+              constraints: BoxConstraints(minWidth: widget.height),
+              padding: EdgeInsets.symmetric(horizontal: widget.radius * 0.5),
+              decoration: BoxDecoration(
+                color: widget.color,
+                borderRadius: BorderRadius.circular(widget.radius),
+              ),
+              alignment: Alignment.center,
+              child: widget.child,
+            ),
           ),
-          alignment: Alignment.center,
-          child: widget.child,
         ),
       ),
     );
