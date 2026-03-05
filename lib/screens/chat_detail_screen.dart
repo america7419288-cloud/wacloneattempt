@@ -126,13 +126,51 @@ Size _imageDisplaySize(double? w, double? h) {
 // ─────────────────────────────────────────────
 //  TELEGRAM BUBBLE ENTRANCE (Velocity Pop)
 // ─────────────────────────────────────────────
-class _TelegramBubbleEntrance extends StatelessWidget {
+class _TelegramBubbleEntrance extends StatefulWidget {
   final Widget child;
   final bool isOutgoing;
   const _TelegramBubbleEntrance({super.key, required this.child, required this.isOutgoing});
+  @override
+  State<_TelegramBubbleEntrance> createState() => _TelegramBubbleEntranceState();
+}
+
+class _TelegramBubbleEntranceState extends State<_TelegramBubbleEntrance>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this, duration: const Duration(milliseconds: 380),
+  );
+  late final Animation<double> _opacity = _ctrl.drive(
+    CurveTween(curve: const Interval(0.0, 0.6, curve: Curves.easeOut)));
+  late final Animation<double> _scale = _ctrl.drive(
+    Tween<double>(begin: 0.75, end: 1.0).chain(
+      CurveTween(curve: const SpringCurve(_kBounceSpring))));
+  late final Animation<double> _dx = _ctrl.drive(
+    Tween<double>(begin: widget.isOutgoing ? 24.0 : -24.0, end: 0.0).chain(
+      CurveTween(curve: const SpringCurve(_kSubtleSpring))));
 
   @override
-  Widget build(BuildContext context) => child;
+  void initState() {
+    super.initState();
+    _ctrl.forward();
+  }
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, child) => Opacity(
+        opacity: _opacity.value.clamp(0.0, 1.0),
+        child: Transform.translate(
+          offset: Offset(_dx.value, 0),
+          child: Transform.scale(scale: _scale.value, child: child),
+        ),
+      ),
+      child: widget.child,
+    );
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -162,23 +200,39 @@ class SpringScaleButton extends StatefulWidget {
   State<SpringScaleButton> createState() => _SpringScaleButtonState();
 }
 
-class _SpringScaleButtonState extends State<SpringScaleButton> with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
+class _SpringScaleButtonState extends State<SpringScaleButton>
+    with SingleTickerProviderStateMixin {
+  // _ctrl drives 0.0 (pressed) ↔ 1.0 (resting)
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this, value: 1.0,
+    lowerBound: 0.0, upperBound: 1.0,
+  );
+  // Map controller range → visual scale range: 1.0 = 0.87, rest = 1.0
+  late final Animation<double> _scaleAnim =
+      _ctrl.drive(Tween<double>(begin: 0.87, end: 1.0));
+
   @override
   void dispose() { _ctrl.dispose(); super.dispose(); }
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTapDown: (_) => _ctrl.animateTo(0.92, curve: const SpringCurve(_kSubtleSpring)),
-      onTapUp: (_) { _ctrl.animateTo(1.0, curve: const SpringCurve(_kBounceSpring)); widget.onTap(); },
-      onTapCancel: () => _ctrl.animateTo(1.0, curve: const SpringCurve(_kSubtleSpring)),
-      child: ScaleTransition(scale: Tween<double>(begin: 1.0, end: 1.0).animate(_ctrl.drive(CurveTween(curve: Curves.linear))), 
-      // Note: AnimatedScale is simpler, but SpringSimulation requires custom controller for exact fidelity
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _ctrl.animateTo(0.0,
+          duration: const Duration(milliseconds: 70), curve: Curves.easeIn),
+      onTapUp: (_) {
+        _ctrl.animateTo(1.0,
+            duration: const Duration(milliseconds: 420),
+            curve: const SpringCurve(_kBounceSpring));
+        widget.onTap();
+      },
+      onTapCancel: () => _ctrl.animateTo(1.0,
+          duration: const Duration(milliseconds: 280), curve: Curves.easeOut),
       child: AnimatedBuilder(
-        animation: _ctrl,
-        builder: (_, child) => Transform.scale(scale: _ctrl.isAnimating ? _ctrl.value : 1.0, child: child),
+        animation: _scaleAnim,
+        builder: (_, child) => Transform.scale(scale: _scaleAnim.value, child: child),
         child: widget.child,
-      )),
+      ),
     );
   }
 }
@@ -216,6 +270,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   String? _highlightedMsgKeyId;
   // NEW-8: Contact typing state for in-list typing bubble
   bool _isContactTyping = false;
+  // FIX 5e: track which messages have already animated in
+  final Set<String> _seenDocIds = {};
 
   // Single shared contact stream — reused by presence subtitle AND bottom bar
   late final Stream<DocumentSnapshot> _contactStream;
@@ -245,6 +301,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     });
 
     _textController.addListener(_onTextChanged);
+
+    // FIX 3: Push edge-to-edge — hides any inherited system nav bar
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    });
   }
 
 
@@ -253,6 +314,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   void dispose() {
     _textController.dispose();
     _scrollController.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
   }
 
@@ -920,7 +982,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   // ─────────────────────────────────────────────
   // Heights used for padding computations
   static const double _kNavBarH = 56.0;
-  static const double _kBottomBarEstH = 68.0;
+  static const double _kBottomBarEstH = 82.0;
 
   @override
   Widget build(BuildContext context) {
@@ -972,101 +1034,29 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ),
           ),
 
-            // LAYER 2: Top scrim gradient (content darkening under nav)
+            // Top scrim removed — blur nav bar handles it
+
+            // Bottom scrim removed — solid input bar handles the background
+
+            // Single BackdropFilter for entire nav area — one GPU pass total
             Positioned(
               top: 0, left: 0, right: 0,
-              // FIX: Match exact height of status bar + nav bar area
-              height: topPad + _kNavBarH, 
-              child: IgnorePointer(
-                child: ClipRect( // Ensures blur doesn't bleed out
+              height: topPad + _kNavBarH,
+              child: ClipRect(
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
                   child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0xAAF2F2F7), 
-                              darkColor: Color(0xAA000000),
-                            ),
-                            context,
-                          ),
-                          // Extra stops to smooth the transition and prevent OLED banding
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0x75F2F2F7),
-                              darkColor: Color(0x75000000),
-                            ),
-                            context,
-                          ),
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0x40F2F2F7),
-                              darkColor: Color(0x40000000),
-                            ),
-                            context,
-                          ),
-                          const Color(0x00000000),
-                        ],
-                        stops: const [0.0, 0.3, 0.6, 1.0], 
-                      ),
-                    ),
+                    color: CupertinoDynamicColor.resolve(
+                      const CupertinoDynamicColor.withBrightness(
+                        color: Color(0x70F2F2F7),
+                        darkColor: Color(0x701C1C1E),
+                      ), context),
+                    alignment: Alignment.bottomCenter,
+                    padding: EdgeInsets.fromLTRB(8, topPad + 6, 8, 8),
+                    child: _buildNavBar(),
                   ),
                 ),
               ),
-            ),
-
-            // LAYER 3: Bottom scrim gradient (content darkening under input)
-            Positioned(
-              bottom: 0, left: 0, right: 0,
-              // FIX: Match height to bottom bar + safe area exactly
-              height: bottomPad + _kBottomBarEstH,
-              child: IgnorePointer(
-                child: ClipRect(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.bottomCenter,
-                        end: Alignment.topCenter,
-                        colors: [
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0xAAF2F2F7),
-                              darkColor: Color(0xAA000000),
-                            ),
-                            context,
-                          ),
-                          // Extra stops to smooth the transition for OLED
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0x75F2F2F7),
-                              darkColor: Color(0x75000000),
-                            ),
-                            context,
-                          ),
-                          CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0x40F2F2F7),
-                              darkColor: Color(0x40000000),
-                            ),
-                            context,
-                          ),
-                          const Color(0x00000000),
-                        ],
-                        stops: const [0.0, 0.3, 0.6, 1.0],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            Positioned(
-              top: topPad + (_kNavBarH - 32) / 2,
-              left: 8,
-              right: 8,
-              child: _buildNavBar(),
             ),
 
             // LAYER 5: Pinned Bar
@@ -1100,24 +1090,18 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  LIQUID GLASS PILL — shared container
   // ─────────────────────────────────────────────
   Widget _buildLiquidPill({required Widget child}) {
+    // No per-pill BackdropFilter — parent nav layer does one blur pass for all
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
         color: CupertinoDynamicColor.resolve(
           const CupertinoDynamicColor.withBrightness(
-            color: Color(0xD8FFFFFF),
-            darkColor: Color(0xD02C2C2E),
+            color: Color(0xC0FFFFFF),
+            darkColor: Color(0xC02C2C2E),
           ),
           context,
         ),
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: CupertinoColors.black.withValues(alpha: 0.08),
-            blurRadius: 8,
-            offset: Offset(0, 2),
-          ),
-        ],
       ),
       child: child,
     );
@@ -1680,10 +1664,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               final isGroup = widget.contactJid.endsWith('@g.us');
               final senderName = data['senderName'] as String? ?? '';
 
-              Widget item = _TelegramBubbleEntrance(
-                key: ValueKey('entrance_$docId'),
-                isOutgoing: isOutgoing,
-                child: _buildMessageItem(
+              final _isNew = !_seenDocIds.contains(docId);
+              _seenDocIds.add(docId);
+              Widget item = _isNew
+                ? _TelegramBubbleEntrance(
+                    key: ValueKey('entrance_$docId'),
+                    isOutgoing: isOutgoing,
+                    child: _buildMessageItem(
                   context, data, docId, isOutgoing, isGroup, senderName,
                   dateHeader, timeStr, isTailMessage, isClusterMember,
                   onJumpToMessage: (msgKeyId) {
@@ -1703,7 +1690,27 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   isHighlighted: _highlightedMsgKeyId != null &&
                       data['msgKeyId'] == _highlightedMsgKeyId,
                 ),
-              );
+              )
+                : _buildMessageItem(
+                    context, data, docId, isOutgoing, isGroup, senderName,
+                    dateHeader, timeStr, isTailMessage, isClusterMember,
+                    onJumpToMessage: (msgKeyId) {
+                      final idx = docs.indexWhere((d) =>
+                          (d.data() as Map)['msgKeyId'] == msgKeyId);
+                      if (idx == -1) return;
+                      _scrollController.animateTo(
+                        (idx * 76.0).clamp(0, _scrollController.position.maxScrollExtent),
+                        duration: const Duration(milliseconds: 450),
+                        curve: Curves.easeOutCubic,
+                      );
+                      setState(() => _highlightedMsgKeyId = msgKeyId);
+                      Future.delayed(const Duration(milliseconds: 1200), () {
+                        if (mounted) setState(() => _highlightedMsgKeyId = null);
+                      });
+                    },
+                    isHighlighted: _highlightedMsgKeyId != null &&
+                        data['msgKeyId'] == _highlightedMsgKeyId,
+                  );
 
               return item;
             },
@@ -1756,11 +1763,22 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  BOTTOM BAR  (blur + input)
   // ─────────────────────────────────────────────
   Widget _buildBottomBar() {
-    // NEW-1: Remove SafeArea wrapper, add manual padding with viewInsets
-    return Padding(
+    final _safeBottom = MediaQuery.of(context).padding.bottom;
+    return Container(
+      decoration: BoxDecoration(
+        color: CupertinoDynamicColor.resolve(
+          const CupertinoDynamicColor.withBrightness(
+            color: Color(0xFFF2F2F7),
+            darkColor: Color(0xFF1C1C1E),
+          ), context),
+        border: Border(top: BorderSide(
+          color: CupertinoColors.separator.resolveFrom(context),
+          width: 0.33,
+        )),
+      ),
       padding: EdgeInsets.only(
-        left: 8, right: 8, top: 4,
-        bottom: MediaQuery.of(context).padding.bottom + 4,
+        left: 10, right: 10, top: 8,
+        bottom: _safeBottom > 0 ? _safeBottom : 10,
       ),
       child: StreamBuilder<DocumentSnapshot>(
         stream: _contactStream,
@@ -1811,9 +1829,12 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Reply banner
-        if (_replyingTo != null)
-          Container(
+        // Reply banner — spring slide-in via AnimatedSize (no AnimationController)
+        AnimatedSize(
+          duration: const Duration(milliseconds: 280),
+          curve: const SpringCurve(_kBounceSpring),
+          alignment: Alignment.topCenter,
+          child: _replyingTo != null ? Container(
                 margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
                 padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
                 decoration: BoxDecoration(
@@ -1864,7 +1885,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         color: CupertinoColors.systemGrey.resolveFrom(context)),
                   ),
                 ]),
-              ),
+              ) : const SizedBox.shrink(),
+        ),
         // Input row — clean iOS Telegram layout
         Row(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -1876,7 +1898,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 padding: const EdgeInsets.only(bottom: 4, right: 6),
                 child: Icon(
                   CupertinoIcons.add_circled_solid,
-                  size: 30,
+                  size: 34,
                   color: CupertinoColors.systemBlue.resolveFrom(context),
                 ),
               ),
@@ -1884,14 +1906,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             // Text field pill — single frosted container, no nested BackdropFilter
             Expanded(
               child: Container(
-                    constraints: const BoxConstraints(maxHeight: 120),
+                    constraints: const BoxConstraints(maxHeight: 140),
                     decoration: BoxDecoration(
                       color: CupertinoDynamicColor.resolve(
                         const CupertinoDynamicColor.withBrightness(
                           color: Color(0xF0FFFFFF),
                           darkColor: Color(0xF02C2C2E),
                         ), context),
-                      borderRadius: BorderRadius.circular(20),
+                      borderRadius: BorderRadius.circular(22),
                       border: Border.all(
                         color: CupertinoDynamicColor.resolve(
                           const CupertinoDynamicColor.withBrightness(
@@ -1905,14 +1927,14 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       controller: _textController,
                       placeholder: 'Message',
                       maxLines: null,
-                      padding: const EdgeInsets.fromLTRB(14, 9, 14, 9),
+                      padding: const EdgeInsets.fromLTRB(16, 11, 16, 11),
                       decoration: null,
                       style: TextStyle(
-                        fontSize: 16,
+                        fontSize: 17,
                         color: CupertinoColors.label.resolveFrom(context),
                       ),
                       placeholderStyle: TextStyle(
-                        fontSize: 16,
+                        fontSize: 17,
                         color: CupertinoColors.placeholderText.resolveFrom(context),
                       ),
                     ),
@@ -3286,34 +3308,62 @@ class _ContextMenuItem extends StatefulWidget {
   State<_ContextMenuItem> createState() => _ContextMenuItemState();
 }
 
-class _ContextMenuItemState extends State<_ContextMenuItem> {
+class _ContextMenuItemState extends State<_ContextMenuItem>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this, value: 1.0, lowerBound: 0.0, upperBound: 1.0,
+  );
+  late final Animation<double> _scaleAnim =
+      _ctrl.drive(Tween<double>(begin: 0.96, end: 1.0));
   bool _pressed = false;
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
   @override
   Widget build(BuildContext context) {
     final color = widget.isDestructive
         ? CupertinoColors.systemRed
         : CupertinoColors.label.resolveFrom(context);
     return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) { setState(() => _pressed = false); widget.onTap(); },
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 80),
-        color: _pressed
-            ? CupertinoColors.systemGrey5.resolveFrom(context)
-            : CupertinoColors.systemBackground.resolveFrom(context),
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                widget.label,
-                style: TextStyle(fontSize: 17, color: color),
+      onTapDown: (_) {
+        setState(() => _pressed = true);
+        _ctrl.animateTo(0.0,
+            duration: const Duration(milliseconds: 60), curve: Curves.easeIn);
+      },
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        _ctrl.animateTo(1.0,
+            duration: const Duration(milliseconds: 350),
+            curve: const SpringCurve(_kBounceSpring));
+        widget.onTap();
+      },
+      onTapCancel: () {
+        setState(() => _pressed = false);
+        _ctrl.animateTo(1.0,
+            duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+      },
+      child: AnimatedBuilder(
+        animation: _scaleAnim,
+        builder: (_, child) => Transform.scale(scale: _scaleAnim.value, child: child),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          color: _pressed
+              ? CupertinoColors.systemGrey5.resolveFrom(context)
+              : CupertinoColors.systemBackground.resolveFrom(context),
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.label,
+                  style: TextStyle(fontSize: 17, color: color),
+                ),
               ),
-            ),
-            Icon(widget.icon, size: 20, color: color),
-          ],
+              Icon(widget.icon, size: 20, color: color),
+            ],
+          ),
         ),
       ),
     );
@@ -3351,18 +3401,34 @@ class _NavPressablePill extends StatefulWidget {
   State<_NavPressablePill> createState() => _NavPressablePillState();
 }
 
-class _NavPressablePillState extends State<_NavPressablePill> {
-  double _scale = 1.0;
+class _NavPressablePillState extends State<_NavPressablePill>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this, value: 1.0, lowerBound: 0.0, upperBound: 1.0,
+  );
+  late final Animation<double> _scaleAnim =
+      _ctrl.drive(Tween<double>(begin: 0.90, end: 1.0));
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTapDown: (_) => setState(() => _scale = 0.92),
-      onTapUp: (_) { setState(() => _scale = 1.0); widget.onTap(); },
-      onTapCancel: () => setState(() => _scale = 1.0),
-      child: AnimatedScale(
-        scale: _scale,
-        duration: const Duration(milliseconds: 100),
-        curve: Curves.easeOut,
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => _ctrl.animateTo(0.0,
+          duration: const Duration(milliseconds: 70), curve: Curves.easeIn),
+      onTapUp: (_) {
+        _ctrl.animateTo(1.0,
+            duration: const Duration(milliseconds: 450),
+            curve: const SpringCurve(_kBounceSpring));
+        widget.onTap();
+      },
+      onTapCancel: () => _ctrl.animateTo(1.0,
+          duration: const Duration(milliseconds: 280), curve: Curves.easeOut),
+      child: AnimatedBuilder(
+        animation: _scaleAnim,
+        builder: (_, child) => Transform.scale(scale: _scaleAnim.value, child: child),
         child: Container(
           height: widget.height,
           constraints: BoxConstraints(minWidth: widget.height),
@@ -3370,7 +3436,6 @@ class _NavPressablePillState extends State<_NavPressablePill> {
           decoration: BoxDecoration(
             color: widget.color,
             borderRadius: BorderRadius.circular(widget.radius),
-            boxShadow: [BoxShadow(color: CupertinoColors.black.withValues(alpha: 0.08), blurRadius: 6, offset: Offset(0, 2))],
           ),
           alignment: Alignment.center,
           child: widget.child,
@@ -3602,8 +3667,8 @@ class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerPro
         builder: (context, child) => Transform.scale(
           scale: _scale.value,
           child: Container(
-            width: 33,
-            height: 33,
+            width: 38,
+            height: 38,
             decoration: const BoxDecoration(
               color: CupertinoColors.systemBlue,
               shape: BoxShape.circle,
@@ -3611,16 +3676,16 @@ class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerPro
             child: Center(
               child: _controller.value > 0.5
                   ? SizedBox(
-                      width: 18,
-                      height: 18,
+                      width: 20,
+                      height: 20,
                       child: CustomPaint(
                         painter: _TelegramSendArrowPainter(CupertinoColors.white),
                       ),
                     )
                   : Image.asset(
                       'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
-                      width: 20,
-                      height: 20,
+                      width: 22,
+                      height: 22,
                       color: CupertinoColors.white,
                     ),
             ),
