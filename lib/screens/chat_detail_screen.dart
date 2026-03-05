@@ -13,6 +13,8 @@ import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io';
 // NEW-4: Tappable links in message text
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:flutter/material.dart' show Material;
@@ -63,7 +65,7 @@ ui.ImageFilter _glassFilter({double sigma = 25}) {
 const _kTelegramSpring = SpringDescription(
   mass: 1.0,
   stiffness: 600.0,
-  damping: 33.0,
+  damping: 26.0, // Tweak: slightly lower damping for more "pop"
 );
 
 const _kBounceSpring = SpringDescription(
@@ -122,6 +124,66 @@ Size _imageDisplaySize(double? w, double? h) {
 }
 
 // ─────────────────────────────────────────────
+//  TELEGRAM BUBBLE ENTRANCE (Velocity Pop)
+// ─────────────────────────────────────────────
+class _TelegramBubbleEntrance extends StatelessWidget {
+  final Widget child;
+  final bool isOutgoing;
+  const _TelegramBubbleEntrance({super.key, required this.child, required this.isOutgoing});
+
+  @override
+  Widget build(BuildContext context) => child;
+}
+
+// ─────────────────────────────────────────────
+//  UTILITIES for background processing & animations
+// ─────────────────────────────────────────────
+Future<Uint8List> _readFileBytes(String path) async {
+  return await SystemChannels.platform.invokeMethod('SystemChrome.readFileBytes', path);
+  // FALLBACK: If method channel fails, use standard dart:io
+  // final file = File(path); return await file.readAsBytes();
+}
+
+class SpringCurve extends Curve {
+  final SpringDescription spring;
+  const SpringCurve(this.spring);
+  @override
+  double transform(double t) {
+    final simulation = SpringSimulation(spring, 0, 1, 0);
+    return simulation.x(t);
+  }
+}
+
+class SpringScaleButton extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onTap;
+  const SpringScaleButton({super.key, required this.child, required this.onTap});
+  @override
+  State<SpringScaleButton> createState() => _SpringScaleButtonState();
+}
+
+class _SpringScaleButtonState extends State<SpringScaleButton> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => _ctrl.animateTo(0.92, curve: const SpringCurve(_kSubtleSpring)),
+      onTapUp: (_) { _ctrl.animateTo(1.0, curve: const SpringCurve(_kBounceSpring)); widget.onTap(); },
+      onTapCancel: () => _ctrl.animateTo(1.0, curve: const SpringCurve(_kSubtleSpring)),
+      child: ScaleTransition(scale: Tween<double>(begin: 1.0, end: 1.0).animate(_ctrl.drive(CurveTween(curve: Curves.linear))), 
+      // Note: AnimatedScale is simpler, but SpringSimulation requires custom controller for exact fidelity
+      child: AnimatedBuilder(
+        animation: _ctrl,
+        builder: (_, child) => Transform.scale(scale: _ctrl.isAnimating ? _ctrl.value : 1.0, child: child),
+        child: widget.child,
+      )),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
 //  MAIN SCREEN
 // ─────────────────────────────────────────────
 class ChatDetailScreen extends StatefulWidget {
@@ -150,7 +212,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   bool _hasText = false;
   int _unreadCount = 0; // for scroll-to-bottom badge
   int _prevDocCount = 0; // tracks previous message count to detect new arrivals
-  double _navPillScale = 1.0; // overscroll bounce for floating pill
   // NEW-5: Highlighted message for jump-to-reply flash
   String? _highlightedMsgKeyId;
   // NEW-8: Contact typing state for in-list typing bubble
@@ -159,9 +220,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   // Single shared contact stream — reused by presence subtitle AND bottom bar
   late final Stream<DocumentSnapshot> _contactStream;
 
-  // NEW-5: High-Fidelity Observers
-  late final _scrollProgress = ValueNotifier<double>(0.0);
-  bool _isMenuOpen = false; // For background scaling micro-interaction
 
   @override
   void initState() {
@@ -179,28 +237,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     // FEATURE 4: Subscribe to this contact's presence so Baileys starts
     // forwarding their typing/online events to us via presence.update.
     // Node's listenToPresenceOutbox picks up this subscribe request.
-    FirebaseFirestore.instance.collection('outbox_presence_subscribe').add({
+    FirebaseFirestore.instance.collection('outbox_presence_subscribe').doc(widget.contactJid).set({
       'jid': widget.contactJid,
       'action': 'subscribe',
       'status': 'pending',
       'timestamp': FieldValue.serverTimestamp(),
     });
 
-    // Scroll-to-bottom tracking is now via NotificationListener (not per-pixel addListener)
-    _scrollController.addListener(_onScroll);
     _textController.addListener(_onTextChanged);
   }
 
-  void _onScroll() {
-    if (_scrollController.hasClients) {
-      final p = (_scrollController.offset / 200.0).clamp(0.0, 1.0);
-      if (p != _scrollProgress.value) _scrollProgress.value = p;
-    }
-  }
+
 
   @override
   void dispose() {
-    _scrollProgress.dispose();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -423,7 +473,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   void _showContextMenu(BuildContext ctx, Map<String, dynamic> data, String docId, Offset tapPosition) {
     if (data['deleted'] == true) return;
     HapticFeedback.mediumImpact();
-    setState(() => _isMenuOpen = true);
 
     const emojis = ['❤️', '👍', '😂', '😮', '😢', '🙏'];
     final isOutgoing = data['isMe'] == true;
@@ -436,7 +485,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           behavior: HitTestBehavior.opaque,
           onTap: () {
             overlay?.remove();
-            setState(() => _isMenuOpen = false);
           },
           child: Material(
             color: const Color(0x00000000),
@@ -449,8 +497,11 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     child: Container(color: CupertinoColors.black.withValues(alpha: 0.2)),
                   ),
                 ),
-                // Menu — centered vertically, aligned to bubble side
-                Center(
+                // Menu — positioned relative to bubble tap
+                Positioned(
+                  top: (tapPosition.dy - 100).clamp(100, MediaQuery.of(ctx).size.height - 300),
+                  left: isOutgoing ? null : 20,
+                  right: isOutgoing ? 20 : null,
                   child: TweenAnimationBuilder<double>(
                     tween: Tween(begin: 0.85, end: 1.0),
                     duration: const Duration(milliseconds: 300),
@@ -458,7 +509,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     builder: (_, scale, child) => Transform.scale(scale: scale, child: child),
                     child: Container(
                       width: 240, // Telegram exact width
-                      margin: const EdgeInsets.symmetric(horizontal: 20),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: isOutgoing
@@ -473,9 +523,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                               borderRadius: BorderRadius.circular(50),
                               boxShadow: [
                                 BoxShadow(
-                                  color: CupertinoColors.black.withValues(alpha: 0.18),
-                                  blurRadius: 20,
-                                  offset: const Offset(0, 6),
+                                  color: CupertinoColors.black.withValues(alpha: 0.25),
+                                  blurRadius: 25,
+                                  offset: const Offset(0, 10),
                                 ),
                               ],
                             ),
@@ -511,8 +561,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
 
                                     // Toggle: same emoji = remove; different = replace
                                     final emojiToSend = isSameEmoji ? '' : e.value;
-                                    setState(() => _isMenuOpen = false);
-
+                      
                                     // Write to WA outbox ('' = remove in WA protocol)
                                     FirebaseFirestore.instance
                                         .collection('outbox_reactions')
@@ -524,29 +573,23 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                       'status': 'pending',
                                     });
 
-                                    // Optimistic local update on Firestore message doc
+                                    // Optimistic local update on Firestore message doc using a transaction
+                                    // to strictly prevent duplicate entries per user.
                                     final msgKeyId = (data['msgKeyId'] ?? '').toString();
                                     if (msgKeyId.isNotEmpty) {
-                                      FirebaseFirestore.instance
-                                          .collection('messages')
-                                          .where('msgKeyId', isEqualTo: msgKeyId)
-                                          .limit(1)
-                                          .get()
-                                          .then((snap) {
-                                        if (snap.docs.isEmpty) return;
-                                        final ref = snap.docs.first.reference;
-                                        final current =
-                                            (snap.docs.first.data()['reactions'] as List<dynamic>? ?? []);
-                                        // Remove any existing reaction from self
+                                      FirebaseFirestore.instance.runTransaction((transaction) async {
+                                        final ref = FirebaseFirestore.instance.collection('messages').doc(docId);
+                                        final snap = await transaction.get(ref);
+                                        
+                                        final current = (snap.data()?['reactions'] as List<dynamic>? ?? []);
                                         final filtered = current
                                             .where((r) => r is Map && r['sender'] != kOwnJid)
                                             .toList();
-                                        // Add new reaction unless toggling off
                                         if (emojiToSend.isNotEmpty) {
                                           filtered.add({'emoji': emojiToSend, 'sender': kOwnJid});
                                         }
-                                        ref.update({'reactions': filtered});
-                                      });
+                                        transaction.update(snap.reference, {'reactions': filtered});
+                                      }).catchError((e) => debugPrint('Reaction transaction failed: $e'));
                                     }
                                   },
                                   child: TweenAnimationBuilder<double>(
@@ -585,8 +628,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                     label: 'Reply',
                                     onTap: () { 
                                       overlay?.remove(); 
-                                      setState(() => _isMenuOpen = false);
-                                      _setReply(data); 
+                                                              _setReply(data); 
                                     },
                                   ),
                                   _ContextMenuDivider(),
@@ -596,8 +638,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                       label: 'Copy',
                                       onTap: () {
                                         overlay?.remove();
-                                        setState(() => _isMenuOpen = false);
-                                        Clipboard.setData(ClipboardData(text: data['text'] ?? ''));
+                                                                  Clipboard.setData(ClipboardData(text: data['text'] ?? ''));
                                         HapticFeedback.selectionClick();
                                       },
                                     ),
@@ -610,8 +651,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                     label: data['isPinned'] == true ? 'Unpin' : 'Pin',
                                     onTap: () { 
                                       overlay?.remove(); 
-                                      setState(() => _isMenuOpen = false);
-                                      _pinMessage(data, docId); 
+                                                              _pinMessage(data, docId); 
                                     },
                                   ),
                                   _ContextMenuDivider(),
@@ -621,8 +661,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                                     isDestructive: true,
                                     onTap: () {
                                       overlay?.remove();
-                                      setState(() => _isMenuOpen = false);
-                                      // FEATURE 2 — Delete for Everyone (Tombstone mechanism)
+                                                              // FEATURE 2 — Delete for Everyone (Tombstone mechanism)
                                       //
                                       // WhatsApp enforces a ~48-hour window for delete-for-everyone.
                                       // We replicate that here:
@@ -756,7 +795,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     await Future.delayed(const Duration(milliseconds: 100));
 
     try {
-      final fileBytes = await file.readAsBytes();
+      final fileBytes = await compute(_readFileBytes, file.path);
       final ext = file.name.contains('.') ? file.name.split('.').last.toLowerCase() : 'jpg';
       final fileName = '${DateTime.now().millisecondsSinceEpoch}.$ext';
 
@@ -895,15 +934,21 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       child: Stack(
         children: [
           // LAYER 0: Wallpaper (edge-to-edge)
-          const Positioned.fill(child: ChatWallpaperBackground()),
+          Stack(
+            children: [
+              const Positioned.fill(child: ChatWallpaperBackground()),
+              // Scrim for better readability & contrast (Issue 21)
+              Positioned.fill(
+                child: Container(color: CupertinoColors.black.withValues(alpha: 0.22)),
+              ),
+            ],
+          ),
 
           // LAYER 1: Messages (edge-to-edge, scrolls behind bars)
           Positioned.fill(
-            child: ValueListenableBuilder<double>(
-              valueListenable: _keyboardHeight,
-              builder: (_, kH, child) => Padding(
-                padding: EdgeInsets.only(bottom: kH + bottomPad + _kBottomBarEstH),
-                child: child,
+            child: Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom + bottomPad + _kBottomBarEstH,
               ),
               child: _buildMessageList(),
             ),
@@ -942,16 +987,29 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         colors: [
                           CupertinoDynamicColor.resolve(
                             const CupertinoDynamicColor.withBrightness(
-                              // Use a much lower opacity (e.g., 0xAA is ~66% vs 0xF2 which is ~95%)
                               color: Color(0xAAF2F2F7), 
                               darkColor: Color(0xAA000000),
                             ),
                             context,
                           ),
+                          // Extra stops to smooth the transition and prevent OLED banding
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0x75F2F2F7),
+                              darkColor: Color(0x75000000),
+                            ),
+                            context,
+                          ),
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0x40F2F2F7),
+                              darkColor: Color(0x40000000),
+                            ),
+                            context,
+                          ),
                           const Color(0x00000000),
                         ],
-                        // Start the fade earlier (0.0) so it's never a solid block
-                        stops: const [0.0, 1.0], 
+                        stops: const [0.0, 0.3, 0.6, 1.0], 
                       ),
                     ),
                   ),
@@ -979,9 +1037,24 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                             ),
                             context,
                           ),
+                          // Extra stops to smooth the transition for OLED
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0x75F2F2F7),
+                              darkColor: Color(0x75000000),
+                            ),
+                            context,
+                          ),
+                          CupertinoDynamicColor.resolve(
+                            const CupertinoDynamicColor.withBrightness(
+                              color: Color(0x40F2F2F7),
+                              darkColor: Color(0x40000000),
+                            ),
+                            context,
+                          ),
                           const Color(0x00000000),
                         ],
-                        stops: const [0.0, 1.0],
+                        stops: const [0.0, 0.3, 0.6, 1.0],
                       ),
                     ),
                   ),
@@ -1027,25 +1100,26 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   //  LIQUID GLASS PILL — shared container
   // ─────────────────────────────────────────────
   Widget _buildLiquidPill({required Widget child}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: BackdropFilter(
-        filter: _glassFilter(sigma: 25),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: CupertinoDynamicColor.resolve(
-              const CupertinoDynamicColor.withBrightness(
-                color: Color(0x94FFFFFF),
-                darkColor: Color(0xAE2C2C2E),
-              ),
-              context,
-            ),
-            borderRadius: BorderRadius.circular(20),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: CupertinoDynamicColor.resolve(
+          const CupertinoDynamicColor.withBrightness(
+            color: Color(0xD8FFFFFF),
+            darkColor: Color(0xD02C2C2E),
           ),
-          child: child,
+          context,
         ),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: CupertinoColors.black.withValues(alpha: 0.08),
+            blurRadius: 8,
+            offset: Offset(0, 2),
+          ),
+        ],
       ),
+      child: child,
     );
   }
 
@@ -1101,8 +1175,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               ),
             ),
             // Unread badge on back button (mock for now as count isn't global)
-            Positioned(
-              top: -2,
+            if (_unreadCount > 0)
+              Positioned(
+                top: -2,
               right: -2,
               child: Container(
                 padding: const EdgeInsets.all(4),
@@ -1129,14 +1204,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         // ── CENTER PILL (avatar + name + status) ──
         Expanded(
           child: Center(
-            child: ValueListenableBuilder<double>(
-              valueListenable: _scrollProgress,
-              builder: (_, p, child) => Transform.scale(
-                scale: 1.0 - (p * 0.04), // Compress to 96% when scrolled
-                alignment: Alignment.center,
-                child: child,
-              ),
-              child: SpringScaleButton(
+            child: SpringScaleButton(
                 onTap: () => Navigator.of(context).push(
                   CupertinoPageRoute(
                     builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
@@ -1198,9 +1266,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               ),
             ),
           ),
-            ),
-          ),
         ),
+      ),
         const SizedBox(width: 8),
 
         // ── RIGHT ICONS (video + phone) — individual 34px circles ──
@@ -1307,9 +1374,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             child: Row(
               children: [
                 // Pin icon
-                const Padding(
-                  padding: EdgeInsets.only(right: 6),
-                  child: Text('📌', style: TextStyle(fontSize: 14)),
+                Padding(
+                  padding: const EdgeInsets.only(right: 8, left: 2),
+                  child: Icon(
+                    CupertinoIcons.pin_fill,
+                    size: 14,
+                    color: CupertinoColors.systemBlue,
+                  ),
                 ),
                 _PinnedProgressBar(total: docs.length, activeIndex: idx),
                 const SizedBox(width: 10),
@@ -1502,16 +1573,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 });
               }
             }
-            // Overscroll bounce for nav pill (reverse list: overscroll at bottom = list top)
-            if (notification is OverscrollNotification) {
-              if (_navPillScale != 0.98) {
-                setState(() => _navPillScale = 0.98);
-              }
-            } else if (notification is ScrollEndNotification) {
-              if (_navPillScale != 1.0) {
-                setState(() => _navPillScale = 1.0);
-              }
-            }
+
             return false;
           },
           child: ListView.builder(
@@ -1536,7 +1598,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   child: Padding(
                     padding: const EdgeInsets.only(left: 6, bottom: 4, top: 6),
                     child: CustomPaint(
-                      painter: _BubbleTailPainter(
+                      painter: _BubbleWithTailPainter(
+                        isOutgoing: false,
+                        isTail: true,
                         color: CupertinoDynamicColor.resolve(
                           const CupertinoDynamicColor.withBrightness(
                             color: Color(0xFFE5E5EA),
@@ -1544,26 +1608,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                           ),
                           context,
                         ),
-                        isOutgoing: false,
                       ),
                       child: Container(
-                        margin: const EdgeInsets.only(left: 8),
+                        margin: const EdgeInsets.only(left: 6),
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0xFFE5E5EA),
-                              darkColor: Color(0xFF2C2C2E),
-                            ),
-                            context,
-                          ),
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(18),
-                            topRight: Radius.circular(18),
-                            bottomRight: Radius.circular(18),
-                            bottomLeft: Radius.circular(4),
-                          ),
-                        ),
                         child: const _TypingIndicator(),
                       ),
                     ),
@@ -1635,30 +1683,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               Widget item = _TelegramBubbleEntrance(
                 key: ValueKey('entrance_$docId'),
                 isOutgoing: isOutgoing,
-                child: _ParallaxBubble(
-                  isOutgoing: isOutgoing,
-                  scrollController: _scrollController,
-                  child: _buildMessageItem(
-                    context, data, docId, isOutgoing, isGroup, senderName,
-                    dateHeader, timeStr, isTailMessage, isClusterMember,
-                    onJumpToMessage: (msgKeyId) {
-                      final idx = docs.indexWhere((d) =>
-                        (d.data() as Map)['msgKeyId'] == msgKeyId);
-                      if (idx == -1) return;
-                      _scrollController.animateTo(
-                        _scrollController.position.maxScrollExtent
-                            - (idx * 72.0),
-                        duration: const Duration(milliseconds: 420),
-                        curve: Curves.easeOutCubic,
-                      );
-                      setState(() => _highlightedMsgKeyId = msgKeyId);
-                      Future.delayed(const Duration(milliseconds: 1200), () {
-                        if (mounted) setState(() => _highlightedMsgKeyId = null);
-                      });
-                    },
-                    isHighlighted: _highlightedMsgKeyId != null &&
-                        data['msgKeyId'] == _highlightedMsgKeyId,
-                  ),
+                child: _buildMessageItem(
+                  context, data, docId, isOutgoing, isGroup, senderName,
+                  dateHeader, timeStr, isTailMessage, isClusterMember,
+                  onJumpToMessage: (msgKeyId) {
+                    final idx = docs.indexWhere((d) =>
+                      (d.data() as Map)['msgKeyId'] == msgKeyId);
+                    if (idx == -1) return;
+                    _scrollController.animateTo(
+                      (idx * 76.0).clamp(0, _scrollController.position.maxScrollExtent),
+                      duration: const Duration(milliseconds: 450),
+                      curve: Curves.easeOutCubic,
+                    );
+                    setState(() => _highlightedMsgKeyId = msgKeyId);
+                    Future.delayed(const Duration(milliseconds: 1200), () {
+                      if (mounted) setState(() => _highlightedMsgKeyId = null);
+                    });
+                  },
+                  isHighlighted: _highlightedMsgKeyId != null &&
+                      data['msgKeyId'] == _highlightedMsgKeyId,
                 ),
               );
 
@@ -1729,8 +1772,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             // NEW-8: Update typing state for message list typing bubble
             final typing = d['presence'] == 'composing';
             if (typing != _isContactTyping) {
+              _isContactTyping = typing;
               WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) setState(() => _isContactTyping = typing);
+                if (mounted) setState(() {});
               });
             }
           }
@@ -1752,8 +1796,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 )
               else
                 _buildInputBar(),
-              // NEW-6: Safe area fill beneath input bar
-              _buildSafeAreaFill(),
             ],
           );
         },
@@ -1761,27 +1803,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     );
   }
 
-  // NEW-6: Safe area colour fill beneath input bar
-  Widget _buildSafeAreaFill() {
-    final bottomInset = MediaQuery.of(context).padding.bottom;
-    if (bottomInset <= 0) return const SizedBox.shrink();
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(0),
-      child: BackdropFilter(
-        filter: _glassFilter(sigma: 25),
-        child: Container(
-          height: bottomInset,
-          color: CupertinoDynamicColor.resolve(
-            const CupertinoDynamicColor.withBrightness(
-              color: Color(0xA8FFFFFF),
-              darkColor: Color(0xB22C2C2E),
-            ),
-            context,
-          ),
-        ),
-      ),
-    );
-  }
 
   // ─────────────────────────────────────────────
   //  INPUT BAR  (Telegram layout)
@@ -1790,235 +1811,120 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Reply banner (animates in/out with slide + fade)
-        AnimatedSwitcher(
-          duration: const Duration(milliseconds: 300),
-          switchInCurve: Curves.easeOutBack,
-          switchOutCurve: Curves.easeIn,
-          transitionBuilder: (child, animation) {
-            final slide = Tween<Offset>(
-              begin: const Offset(0, 1.0),
-              end: Offset.zero,
-            ).animate(animation);
-            return SlideTransition(
-              position: slide,
-              child: FadeTransition(
-                opacity: animation,
-                child: child,
-              ),
-            );
-          },
-          child: _replyingTo != null
-              ? KeyedSubtree(
-                  key: const ValueKey('reply_banner'),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: BackdropFilter(
-                      filter: _glassFilter(sigma: 25),
-                      child: Container(
-                        margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
-                        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                        decoration: BoxDecoration(
-                          color: CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0xD1FFFFFF),   // white @ 0.82
-                              darkColor: Color(0xE02C2C2E), // charcoal @ 0.88
-                            ),
-                            context,
-                          ),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: CupertinoColors.separator.resolveFrom(context),
-                            width: 0.5,
-                          ),
-                        ),
-                        child: Row(
-                      children: [
-                        // Blue accent bar
-                        Container(
-                          width: 3,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: CupertinoColors.systemBlue.resolveFrom(context),
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                _replyingTo!['senderName'] ?? 'Reply',
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: CupertinoColors.systemBlue.resolveFrom(context),
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                _replyingTo!['text'] ?? '',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        CupertinoButton(
-                          padding: EdgeInsets.zero,
-                          minSize: 28,
-                          onPressed: () => setState(() => _replyingTo = null),
-                          child: Icon(
-                            CupertinoIcons.xmark_circle_fill,
-                            size: 20,
-                            color: CupertinoColors.systemGrey.resolveFrom(context),
-                          ),
-                        ),
-                      ],
-                    ),
-                      ),
-                    ),
-                  ),
-                )
-              : const SizedBox.shrink(),
-        ),
-        // Input row
-        Padding(
-          padding: const EdgeInsets.fromLTRB(4, 6, 4, 6),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              // Attach button — circle pill
-              Padding(
-                padding: const EdgeInsets.only(bottom: 2),
-                child: GestureDetector(
-                  onTap: _pickAndSendMedia,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(18),
-                    child: BackdropFilter(
-                      filter: _glassFilter(sigma: 25),
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: CupertinoDynamicColor.resolve(
-                            const CupertinoDynamicColor.withBrightness(
-                              color: Color(0x85FFFFFF),   // white @ 0.52
-                              darkColor: Color(0x9E2C2C2E), // charcoal @ 0.62
-                            ),
-                            context,
-                          ),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          CupertinoIcons.add_circled,
-                          size: 22,
-                          color: CupertinoColors.systemBlue.resolveFrom(context),
-                        ),
-                      ),
-                    ),
+        // Reply banner
+        if (_replyingTo != null)
+          Container(
+                margin: const EdgeInsets.fromLTRB(0, 0, 0, 6),
+                padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                decoration: BoxDecoration(
+                  color: CupertinoDynamicColor.resolve(
+                    const CupertinoDynamicColor.withBrightness(
+                      color: Color(0xF2FFFFFF),
+                      darkColor: Color(0xF02C2C2E),
+                    ), context),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: CupertinoColors.separator.resolveFrom(context),
+                    width: 0.5,
                   ),
                 ),
-              ),
-              const SizedBox(width: 6),
-              // Text field — frosted pill
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(22),
-                  child: BackdropFilter(
-                    filter: _glassFilter(sigma: 25),
-                    child: Container(
-                  constraints: const BoxConstraints(maxHeight: 140),
-                  decoration: BoxDecoration(
-                    color: CupertinoDynamicColor.resolve(
-                      const CupertinoDynamicColor.withBrightness(
-                        color: Color(0xB8FFFFFF),   // white @ 0.72
-                        darkColor: Color(0xC72C2C2E), // charcoal @ 0.78
-                      ),
-                      context,
-                    ),
-                    borderRadius: BorderRadius.circular(22),
-                    border: Border.all(
-                      color: CupertinoDynamicColor.resolve(
-                        const CupertinoDynamicColor.withBrightness(
-                          color: Color(0xFFD0D0D0),
-                          darkColor: Color(0xFF48484A),
-                        ),
-                        context,
-                      ),
-                      width: 0.33,
+                child: Row(children: [
+                  Container(
+                    width: 3, height: 36,
+                    decoration: BoxDecoration(
+                      color: CupertinoColors.systemBlue,
+                      borderRadius: BorderRadius.circular(2),
                     ),
                   ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                  const SizedBox(width: 10),
+                  Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Expanded(
-                        child: CupertinoTextField(
-                          controller: _textController,
-                          placeholder: 'Message',
-                          maxLines: null,
-                          padding: const EdgeInsets.fromLTRB(12, 8, 36, 8),
-                          decoration: null,
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: CupertinoColors.label.resolveFrom(context),
-                          ),
-                          placeholderStyle: TextStyle(
-                            fontSize: 16,
-                            color: CupertinoColors.placeholderText.resolveFrom(context),
-                          ),
-                        ),
+                      Text(
+                        _replyingTo!['senderName'] ?? 'Reply',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: CupertinoColors.systemBlue.resolveFrom(context)),
                       ),
-                      // Emoji / sticker button (inside field, right side)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 6, right: 4),
-                        child: CupertinoButton(
-                          padding: EdgeInsets.zero,
-                          minSize: 32,
-                          // FIX: Previously silent no-op. Now shows a coming-soon hint.
-                          onPressed: () => showCupertinoModalPopup(
-                            context: context,
-                            builder: (ctx) => CupertinoActionSheet(
-                              title: const Text('Emoji & Stickers'),
-                              message: const Text('Emoji picker coming soon. Use your system keyboard emoji key for now.'),
-                              cancelButton: CupertinoActionSheetAction(
-                                isDefaultAction: true,
-                                onPressed: () => Navigator.pop(ctx),
-                                child: const Text('OK'),
-                              ),
-                            ),
-                          ),
-                          child: Image.asset(
-                            'assets/Images.xcassets/Chat/Input/Text/AccessoryIconStickers.imageset/ConversationInputFieldStickerIcon@3x.png',
-                            width: 22,
-                            height: 22,
-                            color: CupertinoColors.systemGrey.resolveFrom(context),
-                          ),
-                        ),
+                      const SizedBox(height: 2),
+                      Text(
+                        _replyingTo!['text'] ?? '',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13,
+                            color: CupertinoColors.secondaryLabel.resolveFrom(context)),
                       ),
                     ],
+                  )),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minSize: 28,
+                    onPressed: () => setState(() => _replyingTo = null),
+                    child: Icon(CupertinoIcons.xmark_circle_fill, size: 20,
+                        color: CupertinoColors.systemGrey.resolveFrom(context)),
                   ),
-                ),
-                  ),
+                ]),
+              ),
+        // Input row — clean iOS Telegram layout
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            // + attach button
+            GestureDetector(
+              onTap: _pickAndSendMedia,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 4, right: 6),
+                child: Icon(
+                  CupertinoIcons.add_circled_solid,
+                  size: 30,
+                  color: CupertinoColors.systemBlue.resolveFrom(context),
                 ),
               ),
-              const SizedBox(width: 6),
-              // Send / mic button
-              _MorphSendButton(
-                hasText: _hasText,
-                onTap: _sendMessage,
-              ),
-            ],
-          ),
+            ),
+            // Text field pill — single frosted container, no nested BackdropFilter
+            Expanded(
+              child: Container(
+                    constraints: const BoxConstraints(maxHeight: 120),
+                    decoration: BoxDecoration(
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xF0FFFFFF),
+                          darkColor: Color(0xF02C2C2E),
+                        ), context),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: CupertinoDynamicColor.resolve(
+                          const CupertinoDynamicColor.withBrightness(
+                            color: Color(0xFFCCCCCC),
+                            darkColor: Color(0xFF48484A),
+                          ), context),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: CupertinoTextField(
+                      controller: _textController,
+                      placeholder: 'Message',
+                      maxLines: null,
+                      padding: const EdgeInsets.fromLTRB(14, 9, 14, 9),
+                      decoration: null,
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: CupertinoColors.label.resolveFrom(context),
+                      ),
+                      placeholderStyle: TextStyle(
+                        fontSize: 16,
+                        color: CupertinoColors.placeholderText.resolveFrom(context),
+                      ),
+                    ),
+                  ),
+            ),
+            const SizedBox(width: 6),
+            // Send / mic — no rotation
+            _MorphSendButton(hasText: _hasText, onTap: _sendMessage),
+          ],
         ),
-      ]);
-
+      ],
+    );
   }
 }
 
@@ -2191,46 +2097,6 @@ class _SpringEntranceWidgetState extends State<_SpringEntranceWidget>
   }
 }
 
-// ─────────────────────────────────────────────
-//  PARALLAX BUBBLE (Scroll depth effect)
-// ─────────────────────────────────────────────
-class _ParallaxBubble extends StatelessWidget {
-  final bool isOutgoing;
-  final Widget child;
-  final ScrollController scrollController;
-
-  const _ParallaxBubble({
-    required this.isOutgoing,
-    required this.child,
-    required this.scrollController,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: scrollController,
-      builder: (context, child) {
-        double parallax = 0;
-        if (scrollController.hasClients) {
-          final renderObject = context.findRenderObject();
-          if (renderObject is RenderBox) {
-            final position = renderObject.localToGlobal(Offset.zero);
-            final screenH = MediaQuery.of(context).size.height;
-            // Distance from center of screen, normalized -1 to 1
-            final center = (position.dy - screenH / 2) / (screenH / 2);
-            // Outgoing shifts right when above center, left when below
-            parallax = center.clamp(-1.0, 1.0) * (isOutgoing ? 4.0 : -4.0);
-          }
-        }
-        return Transform.translate(
-          offset: Offset(parallax, 0),
-          child: child,
-        );
-      },
-      child: child,
-    );
-  }
-}
 
 // ═══════════════════════════════════════════════
 //  SWIPABLE BUBBLE ROW (spring animation)
@@ -2310,9 +2176,14 @@ class _SwipableBubbleRowState extends State<_SwipableBubbleRow>
       damping: 30,
     );
     final simulation = SpringSimulation(spring, start, 0, velocity);
-    _swipeAnim.animateWith(simulation);
-    // Do NOT reset _dragOffset here — let the animation drive value from start → 0
-    _didTriggerHaptic = false;
+    _swipeAnim.animateWith(simulation).then((_) {
+      if (mounted) {
+        setState(() {
+          _dragOffset = 0;
+          _didTriggerHaptic = false;
+        });
+      }
+    });
   }
 
   @override
@@ -2618,20 +2489,19 @@ class _ChatBubble extends StatelessWidget {
                                 Align(
                                   alignment: AlignmentDirectional.centerStart,
                                   widthFactor: 1.0,
-                                  child: Stack(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
                                       _buildContent(context, type, isDeleted, isMediaOnly),
-                                      Positioned(
-                                        bottom: 0,
-                                        right: 0,
-                                        child: _TimeRow(
-                                          time: time,
-                                          isOutgoing: isOutgoing,
-                                          deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
-                                          docId: docId,
-                                          data: data,
-                                          overlayOnMedia: false,
-                                        ),
+                                      const SizedBox(height: 2),
+                                      _TimeRow(
+                                        time: time,
+                                        isOutgoing: isOutgoing,
+                                        deliveryStatus: data['deliveryStatus'] as String? ?? 'pending',
+                                        docId: docId,
+                                        data: data,
+                                        overlayOnMedia: false,
                                       ),
                                     ],
                                   ),
@@ -2685,7 +2555,7 @@ class _ChatBubble extends StatelessWidget {
       duration: const Duration(milliseconds: 300),
       color: isHighlighted
           ? CupertinoColors.systemBlue.withValues(alpha: 0.18)
-          : CupertinoColors.systemBackground.resolveFrom(context).withValues(alpha: 0.0),
+          : null,
       child: bubbleContent,
     );
   }
@@ -3038,37 +2908,76 @@ class _TimeRow extends StatelessWidget {
 // ─────────────────────────────────────────────
 //  DELIVERY TICK
 // ─────────────────────────────────────────────
-class _DeliveryTick extends StatelessWidget {
+class _DeliveryTick extends StatefulWidget {
   final String status;
   final String docId;
   final Map<String, dynamic> data;
   const _DeliveryTick({required this.status, required this.docId, required this.data});
 
   @override
+  State<_DeliveryTick> createState() => _DeliveryTickState();
+}
+
+class _DeliveryTickState extends State<_DeliveryTick> with SingleTickerProviderStateMixin {
+  late AnimationController _anim;
+  late String _currentStatus;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentStatus = widget.status;
+    _anim = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+    if (_currentStatus == 'read' || _currentStatus == 'played') _anim.value = 1.0;
+  }
+
+  @override
+  void didUpdateWidget(_DeliveryTick old) {
+    super.didUpdateWidget(old);
+    if (widget.status != _currentStatus) {
+      if ((widget.status == 'read' || widget.status == 'played') && 
+          (_currentStatus != 'read' && _currentStatus != 'played')) {
+        _anim.forward(from: 0.0);
+      } else if (widget.status == 'read' || widget.status == 'played') {
+        _anim.value = 1.0;
+      }
+      _currentStatus = widget.status;
+    }
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final brightness = CupertinoTheme.brightnessOf(context);
-    final readColor = brightness == Brightness.dark
-        ? const Color(0xFF4FC3F7)
-        : const Color(0xFF4A90D9);
-    final mutedColor = brightness == Brightness.dark
-        ? CupertinoColors.white.withValues(alpha: 0.5)
-        : const Color(0xFF3D8B45);
-    switch (status) {
+    final readColor = brightness == Brightness.dark ? const Color(0xFF4FC3F7) : const Color(0xFF4A90D9);
+    final mutedColor = brightness == Brightness.dark ? CupertinoColors.white.withValues(alpha: 0.5) : const Color(0xFF3D8B45);
+
+    switch (widget.status) {
       case 'read':
       case 'played':
-        // POLISH-2: Custom painted double tick (read)
-        return SizedBox(
-          width: 22, height: 12,
-          child: CustomPaint(painter: _TickPainter(double_: true, color: readColor)),
+        return AnimatedBuilder(
+          animation: _anim,
+          builder: (context, _) => SizedBox(
+            width: 22, height: 12,
+            child: CustomPaint(
+              painter: _TickPainter(
+                double_: true, 
+                color: readColor, 
+                drawProgress: _anim.value,
+              ),
+            ),
+          ),
         );
       case 'delivered':
-        // POLISH-2: Custom painted double tick (delivered)
         return SizedBox(
           width: 22, height: 12,
           child: CustomPaint(painter: _TickPainter(double_: true, color: mutedColor)),
         );
       case 'sent':
-        // POLISH-2: Custom painted single tick
         return SizedBox(
           width: 14, height: 12,
           child: CustomPaint(painter: _TickPainter(double_: false, color: mutedColor)),
@@ -3076,41 +2985,24 @@ class _DeliveryTick extends StatelessWidget {
       case 'error':
         return GestureDetector(
           onTap: () {
-            final type = data['type'] as String?;
-            if (['image', 'video', 'file', 'audio'].contains(type)) {
-              FirebaseFirestore.instance
-                  .collection('outbox_media')
-                  .where('localId', isEqualTo: data['localId'])
-                  .limit(1)
-                  .get()
-                  .then((s) {
-                if (s.docs.isNotEmpty) s.docs.first.reference.update({'status': 'pending'});
-              });
-            } else {
-              FirebaseFirestore.instance
-                  .collection('outbox')
-                  .where('localId', isEqualTo: data['localId'])
-                  .limit(1)
-                  .get()
-                  .then((s) {
-                if (s.docs.isNotEmpty) s.docs.first.reference.update({'status': 'pending'});
-              });
-            }
+            final type = widget.data['type'] as String?;
+            final coll = ['image', 'video', 'file', 'audio'].contains(type) ? 'outbox_media' : 'outbox';
             FirebaseFirestore.instance
-                .collection('messages')
-                .doc(docId)
-                .update({'deliveryStatus': 'pending'});
+                .collection(coll)
+                .where('localId', isEqualTo: widget.data['localId'])
+                .limit(1)
+                .get()
+                .then((s) {
+              if (s.docs.isNotEmpty) s.docs.first.reference.update({'status': 'pending'});
+            });
+            FirebaseFirestore.instance.collection('messages').doc(widget.docId).update({'deliveryStatus': 'pending'});
           },
-          child: const Icon(CupertinoIcons.exclamationmark_circle,
-              color: CupertinoColors.systemRed, size: 14),
+          child: const Icon(CupertinoIcons.exclamationmark_circle, color: CupertinoColors.systemRed, size: 14),
         );
       default: // pending
-        // POLISH-2: Custom painted single tick (pending)
         return SizedBox(
           width: 14, height: 12,
-          child: CustomPaint(
-            painter: _TickPainter(double_: false, color: mutedColor.withValues(alpha: 0.6)),
-          ),
+          child: CustomPaint(painter: _TickPainter(double_: false, color: mutedColor.withValues(alpha: 0.6))),
         );
     }
   }
@@ -3122,7 +3014,8 @@ class _DeliveryTick extends StatelessWidget {
 class _TickPainter extends CustomPainter {
   final bool double_;
   final Color color;
-  _TickPainter({required this.double_, required this.color});
+  final double drawProgress; // NEW: for draw/slide animation
+  _TickPainter({required this.double_, required this.color, this.drawProgress = 1.0});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -3133,7 +3026,7 @@ class _TickPainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round
       ..style = PaintingStyle.stroke;
 
-    // First tick (or only tick for single)
+    // First tick (always drawn at full opacity if not pending)
     final offset = double_ ? -3.0 : 0.0;
     final path1 = Path()
       ..moveTo(size.width * 0.15 + offset, size.height * 0.52)
@@ -3142,12 +3035,25 @@ class _TickPainter extends CustomPainter {
     canvas.drawPath(path1, p);
 
     if (double_) {
-      // Second tick (shifted right and slightly overlapping)
+      // Second tick (Telegram-style: slides in and fades in)
+      canvas.save();
+      // Slide in from the left
+      final slide = (1.0 - drawProgress) * -4.0;
+      canvas.translate(slide, 0);
+      
+      final p2 = Paint()
+        ..color = color.withValues(alpha: drawProgress)
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke;
+
       final path2 = Path()
         ..moveTo(size.width * 0.35, size.height * 0.52)
         ..lineTo(size.width * 0.58, size.height * 0.75)
         ..lineTo(size.width * 0.92, size.height * 0.25);
-      canvas.drawPath(path2, p);
+      canvas.drawPath(path2, p2);
+      canvas.restore();
     }
   }
 
@@ -3361,115 +3267,6 @@ class _ReplyPreviewInBubble extends StatelessWidget {
 // ─────────────────────────────────────────────
 //  REPLY BANNER (above input bar)
 // ─────────────────────────────────────────────
-class _ReplyBanner extends StatelessWidget {
-  final Map<String, dynamic> data;
-  final VoidCallback onCancel;
-  const _ReplyBanner({required this.data, required this.onCancel});
-
-  @override
-  Widget build(BuildContext context) {
-    final text = data['text'] as String? ?? '';
-    final mediaUrl = data['mediaUrl'] as String?;
-    final type = data['type'] as String?;
-    final author = data['senderName'] as String? ?? data['from'] as String? ?? '';
-    // FIX: Use kOwnJid to identify self, not a regex number check (same as _ReplyPreviewInBubble)
-    final ownPhone = kOwnJid.split('@').first;
-    final isOwnMessage = author.isEmpty || author == kOwnJid || author == ownPhone || author == 'me';
-    final displayAuthor = isOwnMessage ? 'You' : author;
-
-    final previewText = text.isNotEmpty
-        ? text
-        : type == 'image'
-            ? '📷 Photo'
-            : type == 'video'
-                ? '🎬 Video'
-                : type == 'audio'
-                    ? '🎤 Voice message'
-                    : '📎 Attachment';
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
-      decoration: BoxDecoration(
-        border: Border(
-          top: BorderSide(
-            color: CupertinoColors.separator.resolveFrom(context),
-            width: 0.33,
-          ),
-        ),
-      ),
-      child: Row(
-        children: [
-          // Left accent — animates width from 0 → 3px
-          TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: 3),
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOutBack,
-            builder: (_, w, __) => Container(
-              width: w,
-              height: 40,
-              decoration: BoxDecoration(
-                color: CupertinoColors.systemBlue,
-                borderRadius: BorderRadius.circular(1.5),
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  displayAuthor,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: CupertinoColors.systemBlue,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  previewText,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Thumbnail
-          if (mediaUrl != null && mediaUrl.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(left: 8),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: CachedNetworkImage(
-                  imageUrl: mediaUrl,
-                  width: 40,
-                  height: 40,
-                  fit: BoxFit.cover,
-                ),
-              ),
-            ),
-          // Cancel
-          CupertinoButton(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            minSize: 36,
-            onPressed: onCancel,
-            child: Icon(
-              CupertinoIcons.xmark_circle_fill,
-              size: 20,
-              color: CupertinoColors.systemGrey.resolveFrom(context),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 // ─────────────────────────────────────────────
 //  CONTEXT MENU ITEM
@@ -3566,22 +3363,17 @@ class _NavPressablePillState extends State<_NavPressablePill> {
         scale: _scale,
         duration: const Duration(milliseconds: 100),
         curve: Curves.easeOut,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(widget.radius),
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: Container(
-              height: widget.height,
-              constraints: BoxConstraints(minWidth: widget.height),
-              padding: EdgeInsets.symmetric(horizontal: widget.radius * 0.5),
-              decoration: BoxDecoration(
-                color: widget.color,
-                borderRadius: BorderRadius.circular(widget.radius),
-              ),
-              alignment: Alignment.center,
-              child: widget.child,
-            ),
+        child: Container(
+          height: widget.height,
+          constraints: BoxConstraints(minWidth: widget.height),
+          padding: EdgeInsets.symmetric(horizontal: widget.radius * 0.5),
+          decoration: BoxDecoration(
+            color: widget.color,
+            borderRadius: BorderRadius.circular(widget.radius),
+            boxShadow: [BoxShadow(color: CupertinoColors.black.withValues(alpha: 0.08), blurRadius: 6, offset: Offset(0, 2))],
           ),
+          alignment: Alignment.center,
+          child: widget.child,
         ),
       ),
     );
@@ -3591,85 +3383,89 @@ class _NavPressablePillState extends State<_NavPressablePill> {
 // ─────────────────────────────────────────────
 //  SCROLL TO BOTTOM BUTTON
 // ─────────────────────────────────────────────
-class _ScrollToBottomButton extends StatelessWidget {
+class _SpringScrollButton extends StatelessWidget {
+  final bool visible;
   final int unreadCount;
   final VoidCallback onTap;
-  const _ScrollToBottomButton({required this.unreadCount, required this.onTap});
+  const _SpringScrollButton({required this.visible, required this.unreadCount, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(18),
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-               child: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
-                  color: CupertinoDynamicColor.resolve(
-                    const CupertinoDynamicColor.withBrightness(
-                      color: Color(0x94FFFFFF),
-                      darkColor: Color(0xAE2C2C2E),
-                    ),
-                    context,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: CupertinoColors.black.withValues(alpha: 0.15),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Icon(
-                  CupertinoIcons.chevron_down,
-                  size: 20,
-                  color: CupertinoColors.systemBlue.resolveFrom(context),
-                ),
-              ),
-            ),
-          ),
-          if (unreadCount > 0)
-            Positioned(
-              top: -4,
-              right: -2,
-              child: Builder(
-                builder: (context) {
-                  final text = unreadCount > 99 ? '99+' : '$unreadCount';
-                  final isWide = text.length >= 2;
-                  return Container(
-                    constraints: BoxConstraints(
-                      minWidth: isWide ? 18.0 + 10.0 : 18.0,
-                      minHeight: 18.0,
-                    ),
-                    padding: EdgeInsets.symmetric(
-                      horizontal: isWide ? 5 : 0,
-                      vertical: 1,
-                    ),
+    return AnimatedSlide(
+      offset: visible ? Offset.zero : const Offset(0, 2),
+      duration: const Duration(milliseconds: 400),
+      curve: const SpringCurve(_kSubtleSpring),
+      child: AnimatedOpacity(
+        opacity: visible ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 200),
+        child: SpringScaleButton(
+          onTap: onTap,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Container(
+                    width: 36,
+                    height: 36,
                     decoration: BoxDecoration(
-                      color: CupertinoColors.systemBlue,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      text,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: CupertinoColors.white,
+                      borderRadius: BorderRadius.circular(18),
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xD8FFFFFF),
+                          darkColor: Color(0xD02C2C2E),
+                        ),
+                        context,
                       ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: CupertinoColors.black.withValues(alpha: 0.15),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
                     ),
-                  );
-                },
-              ),
-            ),
-        ],
+                    child: Icon(
+                      CupertinoIcons.chevron_down,
+                      size: 20,
+                      color: CupertinoColors.systemBlue.resolveFrom(context),
+                    ),
+                  ),
+              if (unreadCount > 0)
+                Positioned(
+                  top: -4,
+                  right: -2,
+                  child: Builder(
+                    builder: (context) {
+                      final text = unreadCount > 99 ? '99+' : '$unreadCount';
+                      final isWide = text.length >= 2;
+                      return Container(
+                        constraints: BoxConstraints(
+                          minWidth: isWide ? 18.0 + 10.0 : 18.0,
+                          minHeight: 18.0,
+                        ),
+                        padding: EdgeInsets.symmetric(
+                          horizontal: isWide ? 5 : 0,
+                          vertical: 1,
+                        ),
+                        decoration: BoxDecoration(
+                          color: CupertinoColors.systemBlue,
+                          borderRadius: BorderRadius.circular(9),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          text,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -3755,46 +3551,6 @@ class _InputIconButtonState extends State<_InputIconButton> {
 // ─────────────────────────────────────────────
 //  SEND BUTTON
 // ─────────────────────────────────────────────
-class _SendButton extends StatefulWidget {
-  final VoidCallback onTap;
-  const _SendButton({super.key, required this.onTap});
-  @override
-  State<_SendButton> createState() => _SendButtonState();
-}
-
-class _SendButtonState extends State<_SendButton> {
-  double _scale = 1.0;
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _scale = 0.88),
-      onTapUp: (_) { setState(() => _scale = 1.0); HapticFeedback.selectionClick(); widget.onTap(); },
-      onTapCancel: () => setState(() => _scale = 1.0),
-      child: AnimatedScale(
-        scale: _scale,
-        duration: const Duration(milliseconds: 100),
-        curve: Curves.easeOut,
-        child: Container(
-          width: 33,
-          height: 33,
-          decoration: const BoxDecoration(
-            color: CupertinoColors.systemBlue,
-            shape: BoxShape.circle,
-          ),
-          child: Center(
-            child: SizedBox(
-              width: 18,
-              height: 18,
-              child: CustomPaint(
-                painter: _TelegramSendArrowPainter(CupertinoColors.white),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 // ─────────────────────────────────────────────
 //  MORPH SEND BUTTON (Rotational Spring)
@@ -3811,16 +3567,12 @@ class _MorphSendButton extends StatefulWidget {
 
 class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
-  late final Animation<double> _rotation;
   late final Animation<double> _scale;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
-    _rotation = Tween<double>(begin: -math.pi / 2, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
-    );
     _scale = Tween<double>(begin: 0.8, end: 1.0).animate(
       CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
     );
@@ -3844,36 +3596,33 @@ class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerPro
   @override
   Widget build(BuildContext context) {
     return SpringScaleButton(
-      onTap: widget.hasText ? widget.onTap : null,
+      onTap: widget.hasText ? widget.onTap : () {},
       child: AnimatedBuilder(
         animation: _controller,
         builder: (context, child) => Transform.scale(
           scale: _scale.value,
-          child: Transform.rotate(
-            angle: _rotation.value,
-            child: Container(
-              width: 33,
-              height: 33,
-              decoration: const BoxDecoration(
-                color: CupertinoColors.systemBlue,
-                shape: BoxShape.circle,
-              ),
-              child: Center(
-                child: _controller.value > 0.5
-                    ? SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CustomPaint(
-                          painter: _TelegramSendArrowPainter(CupertinoColors.white),
-                        ),
-                      )
-                    : Image.asset(
-                        'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
-                        width: 20,
-                        height: 20,
-                        color: CupertinoColors.white,
+          child: Container(
+            width: 33,
+            height: 33,
+            decoration: const BoxDecoration(
+              color: CupertinoColors.systemBlue,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: _controller.value > 0.5
+                  ? SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CustomPaint(
+                        painter: _TelegramSendArrowPainter(CupertinoColors.white),
                       ),
-              ),
+                    )
+                  : Image.asset(
+                      'assets/Images.xcassets/Chat/Input/Text/IconMicrophone.imageset/ModernConversationMicButton@3x.png',
+                      width: 20,
+                      height: 20,
+                      color: CupertinoColors.white,
+                    ),
             ),
           ),
         ),
@@ -3896,10 +3645,7 @@ class _DateChip extends StatelessWidget {
     final diff = today.difference(dateOnly).inDays;
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Yesterday';
-    const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-    ];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     if (diff < 365) return '${d.day} ${months[d.month - 1]}';
     return '${d.day} ${months[d.month - 1]} ${d.year}';
   }
@@ -3909,31 +3655,19 @@ class _DateChip extends StatelessWidget {
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: BackdropFilter(
-            filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-              decoration: BoxDecoration(
-                color: const Color(0x7A000000), // Semi-transparent dark for legibility
-                borderRadius: BorderRadius.circular(10), // tighter radius
-                boxShadow: [
-                  BoxShadow(
-                    color: CupertinoColors.black.withValues(alpha: 0.1),
-                    blurRadius: 4,
-                  )
-                ],
-              ),
-              child: Text(
-                _formatDate(date),
-                style: const TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: CupertinoColors.white,
-                  letterSpacing: -0.2,
-                ),
-              ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 4),
+          decoration: BoxDecoration(
+            color: CupertinoColors.black.withValues(alpha: 0.30),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(
+            _formatDate(date),
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.label.resolveFrom(context).withValues(alpha: 0.9),
+              letterSpacing: -0.1,
             ),
           ),
         ),
@@ -4214,7 +3948,7 @@ class _ImageContent extends StatelessWidget {
               style: TextStyle(
                 fontSize: 15,
                 color: isOutgoing
-                    ? CupertinoColors.white
+                    ? _outgoingTextColor(context)
                     : CupertinoColors.label.resolveFrom(context),
               ),
             ),
@@ -4284,7 +4018,7 @@ class _VideoContent extends StatelessWidget {
               style: TextStyle(
                 fontSize: 15,
                 color: isOutgoing
-                    ? CupertinoColors.white
+                    ? _outgoingTextColor(context)
                     : CupertinoColors.label.resolveFrom(context),
               ),
             ),
@@ -4781,181 +4515,3 @@ class _VideoPlayerPageState extends State<_VideoPlayerPage> {
     );
   }
 }
-
-// ─────────────────────────────────────────────
-//  SPRING PHYSICS UTILITY
-// ─────────────────────────────────────────────
-class SpringCurve extends Curve {
-  final SpringDescription spring;
-  const SpringCurve(this.spring);
-
-  @override
-  double transform(double t) {
-    final sim = SpringSimulation(spring, 0, 1, 0);
-    return sim.x(t).clamp(0.0, 1.0);
-  }
-}
-
-// ─────────────────────────────────────────────
-//  TELEGRAM BUBBLE ENTRANCE (Velocity Pop)
-// ─────────────────────────────────────────────
-class _TelegramBubbleEntrance extends StatefulWidget {
-  final Widget child;
-  final bool isOutgoing;
-  const _TelegramBubbleEntrance({super.key, required this.child, required this.isOutgoing});
-
-  @override
-  State<_TelegramBubbleEntrance> createState() => _TelegramBubbleEntranceState();
-}
-
-class _TelegramBubbleEntranceState extends State<_TelegramBubbleEntrance> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scale;
-  late final Animation<double> _drift;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
-    _scale = Tween<double>(begin: 0.6, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kBounceSpring)),
-    );
-    _drift = Tween<double>(begin: widget.isOutgoing ? 40.0 : -40.0, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kSubtleSpring)),
-    );
-    _controller.forward();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => Opacity(
-        opacity: _controller.value.clamp(0.0, 1.0),
-        child: Transform.scale(
-          scale: _scale.value,
-          child: Transform.translate(
-            offset: Offset(_drift.value, 0),
-            child: child,
-          ),
-        ),
-      ),
-      child: widget.child,
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-//  SPRING SCROLL BUTTON (Scroll-to-bottom)
-// ─────────────────────────────────────────────
-class _SpringScrollButton extends StatefulWidget {
-  final bool visible;
-  final int unreadCount;
-  final VoidCallback onTap;
-
-  const _SpringScrollButton({
-    required this.visible,
-    required this.unreadCount,
-    required this.onTap,
-  });
-
-  @override
-  State<_SpringScrollButton> createState() => _SpringScrollButtonState();
-}
-
-class _SpringScrollButtonState extends State<_SpringScrollButton> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
-    _scale = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: const SpringCurve(_kBounceSpring)),
-    );
-    if (widget.visible) _controller.value = 1.0;
-  }
-
-  @override
-  void didUpdateWidget(_SpringScrollButton old) {
-    super.didUpdateWidget(old);
-    if (widget.visible != old.visible) {
-      widget.visible ? _controller.forward() : _controller.reverse();
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => Transform.scale(
-        scale: _scale.value,
-        child: _ScrollToBottomButton(
-          unreadCount: widget.unreadCount,
-          onTap: widget.onTap,
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-//  SPRING SCALE BUTTON (Physics feedback)
-// ─────────────────────────────────────────────
-class SpringScaleButton extends StatefulWidget {
-  final Widget child;
-  final VoidCallback? onTap;
-  const SpringScaleButton({super.key, required this.child, this.onTap});
-
-  @override
-  State<SpringScaleButton> createState() => _SpringScaleButtonState();
-}
-
-class _SpringScaleButtonState extends State<SpringScaleButton> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _scale;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 150));
-    _scale = Tween<double>(begin: 1.0, end: 0.94).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) => _controller.forward(),
-      onTapUp: (_) => _controller.reverse(),
-      onTapCancel: () => _controller.reverse(),
-      onTap: widget.onTap,
-      child: ScaleTransition(scale: _scale, child: widget.child),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────
-//  KEYBOARD HEIGHT OBSERVER (REMOVED - Using MediaQuery now)
-// ─────────────────────────────────────────────
-
