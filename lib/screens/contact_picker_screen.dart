@@ -2,7 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'chat_detail_screen.dart';
+import 'chat_detail_screen.dart' show ChatDetailScreen, TelegramPageRoute;
 
 class ContactPickerScreen extends StatefulWidget {
   const ContactPickerScreen({super.key});
@@ -78,7 +78,7 @@ class _ContactPickerScreenState extends State<ContactPickerScreen> {
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          CupertinoPageRoute(
+          TelegramPageRoute(
             builder: (_) => ChatDetailScreen(
               contactJid: fullJid,
               contactName: contact.displayName,

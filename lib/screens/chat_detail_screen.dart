@@ -13,6 +13,7 @@ import 'package:video_player/video_player.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import '../wallpaper_service.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:io';
 // NEW-4: Tappable links in message text
@@ -27,14 +28,40 @@ import 'status_screen.dart' show kOwnJid;
 // ─────────────────────────────────────────────
 // Outgoing light: soft Telegram green. Dark: Telegram's deep blue.
 // FIX: Exact Telegram iOS bubble palette
-const _incomingBubbleColor = CupertinoDynamicColor.withBrightness(
-  color: Color(0xFFFFFFFF),       // pure white (light)
-  darkColor: Color(0xFF1C2733),   // Telegram's exact cool dark incoming
-);
-const _outgoingBubbleColor = CupertinoDynamicColor.withBrightness(
-  color: Color(0xFFEEFEDF),       // Telegram's slightly saturated green
-  darkColor: Color(0xFF2B5278),   // Telegram dark mode blue
-);
+// Returns the wallpaper-derived accent color, with a minimum luminance
+// floor so bubbles always remain visible against the wallpaper.
+Color _wallpaperAccent(BuildContext context) {
+  final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+  final raw = WallpaperService.instance.accentColor(dark: isDark);
+  // Ensure sufficient contrast: shift toward white in dark mode, darken in light
+  final lum = raw.computeLuminance();
+  if (isDark && lum < 0.12) {
+    // Too dark for dark mode — lighten it
+    return Color.lerp(raw, CupertinoColors.white, 0.55)!;
+  }
+  if (!isDark && lum > 0.80) {
+    // Too light for light mode — darken it
+    return Color.lerp(raw, CupertinoColors.black, 0.40)!;
+  }
+  return raw;
+}
+
+Color _incomingBubbleColor(BuildContext context) {
+  final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+  // Incoming is always neutral — just tinted very slightly with accent
+  final base = isDark ? const Color(0xFF1C2733) : const Color(0xFFFFFFFF);
+  final accent = _wallpaperAccent(context);
+  return Color.lerp(base, accent, isDark ? 0.08 : 0.06)!;
+}
+
+Color _outgoingBubbleColor(BuildContext context) {
+  final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+  final accent = _wallpaperAccent(context);
+  // Outgoing is a tinted version of accent — always readable
+  return isDark
+      ? Color.lerp(const Color(0xFF000000), accent, 0.45)!.withOpacity(0.92)
+      : Color.lerp(const Color(0xFFFFFFFF), accent, 0.28)!;
+}
 
 // ─────────────────────────────────────────────
 //  DYNAMIC OUTGOING TEXT COLOR
@@ -308,6 +335,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
         statusBarColor: Color(0x00000000),
         statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Color(0x00000000),
+        systemNavigationBarContrastEnforced: false,
       ));
     });
   }
@@ -386,6 +415,8 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       };
     }
     FirebaseFirestore.instance.collection('outbox').add(outboxPayload);
+
+    WallpaperService.instance.triggerAnimation();
 
     _textController.clear();
     setState(() => _replyingTo = null);
@@ -837,7 +868,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   void _openProfileViewer() {
     if (widget.profileUrl == null || widget.profileUrl!.isEmpty) return;
     Navigator.of(context).push(
-      CupertinoPageRoute(
+      TelegramPageRoute(
         builder: (_) => _ProfileViewerPage(
           imageUrl: widget.profileUrl!,
           name: widget.contactName,
@@ -1007,6 +1038,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
         statusBarBrightness: Brightness.dark,
         statusBarIconBrightness: Brightness.light,
         systemNavigationBarColor: Color(0x00000000),
+        systemNavigationBarContrastEnforced: false,
       ),
       child: CupertinoPageScaffold(
       resizeToAvoidBottomInset: false,
@@ -1018,21 +1050,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           Stack(
             children: [
               const Positioned.fill(child: ChatWallpaperBackground()),
-              // Scrim for better readability & contrast (Issue 21)
-              Positioned.fill(
-                child: Container(color: CupertinoColors.black.withValues(alpha: 0.22)),
-              ),
             ],
           ),
 
           // LAYER 1: Messages (edge-to-edge, scrolls behind bars)
+          // No bottom clipping — list extends behind the translucent input bar
           Positioned.fill(
-            child: Padding(
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom + bottomPad + _kBottomBarEstH,
-              ),
-              child: _buildMessageList(),
-            ),
+            child: _buildMessageList(),
           ),
 
           // LAYER 1b: Scroll-to-bottom button
@@ -1053,11 +1077,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             ),
           ),
 
-            // Top scrim removed — blur nav bar handles it
-
-            // Bottom scrim removed — solid input bar handles the background
-
-            // Single BackdropFilter for entire nav area — one GPU pass total
+            // Telegram-style full-width frosted header bar
             Positioned(
               top: 0, left: 0, right: 0,
               height: topPad + _kNavBarH,
@@ -1065,9 +1085,20 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 child: BackdropFilter(
                   filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
                   child: Container(
-                    color: const Color(0x00000000),
-                    alignment: Alignment.bottomCenter,
-                    padding: EdgeInsets.fromLTRB(8, topPad + 6, 8, 8),
+                    decoration: BoxDecoration(
+                      color: CupertinoDynamicColor.resolve(
+                        const CupertinoDynamicColor.withBrightness(
+                          color: Color(0xCCF2F2F7),
+                          darkColor: Color(0xCC1C1C1E),
+                        ), context),
+                      border: Border(
+                        bottom: BorderSide(
+                          color: CupertinoColors.separator.resolveFrom(context),
+                          width: 0.33,
+                        ),
+                      ),
+                    ),
+                    padding: EdgeInsets.only(top: topPad),
                     child: _buildNavBar(),
                   ),
                 ),
@@ -1082,7 +1113,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               child: _buildPinnedBanner(),
             ),
 
-            // NEW-1: LAYER 6 changed from Positioned to Align for keyboard sync
+
             // LAYER 6: Bottom Bar (Input)
             Positioned(
               bottom: MediaQuery.of(context).viewInsets.bottom,
@@ -1097,252 +1128,128 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   }
 
   // ─────────────────────────────────────────────
-  //  NAV BAR  (Telegram-style)
-  // ─────────────────────────────────────────────
-  // ─ Saturation boost matrix (1.7×) for glass vibrancy ─
-  // ─ Saturation boost matrix removed — no longer needed ─
-
-  // ─────────────────────────────────────────────
-  //  LIQUID GLASS PILL — shared container
-  // ─────────────────────────────────────────────
-  Widget _buildLiquidPill({required Widget child}) {
-    // No per-pill BackdropFilter — parent nav layer does one blur pass for all
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: CupertinoDynamicColor.resolve(
-          const CupertinoDynamicColor.withBrightness(
-            color: Color(0xC0FFFFFF),
-            darkColor: Color(0xC02C2C2E),
-          ),
-          context,
-        ),
-        borderRadius: BorderRadius.circular(50),
-        border: Border.all(
-          color: CupertinoDynamicColor.resolve(
-            const CupertinoDynamicColor.withBrightness(
-              color: Color(0x40FFFFFF),
-              darkColor: Color(0x20FFFFFF),
-            ), context),
-          width: 0.5,
-        ),
-      ),
-      child: child,
-    );
-  }
-
-  // ─────────────────────────────────────────────
-  //  HEADER CONTENT — 3 separate Telegram-style pills
+  //  NAV BAR  (Telegram-style solid header)
   // ─────────────────────────────────────────────
   Widget _buildNavBar() {
-    final pillColor = CupertinoDynamicColor.resolve(
-      const CupertinoDynamicColor.withBrightness(
-        color: Color(0x94FFFFFF),   // white @ 0.58
-        darkColor: Color(0xAE2C2C2E), // charcoal @ 0.68
-      ),
-      context,
-    );
-    final iconPillColor = CupertinoDynamicColor.resolve(
-      const CupertinoDynamicColor.withBrightness(
-        color: Color(0x85FFFFFF),   // white @ 0.52
-        darkColor: Color(0x9E2C2C2E), // charcoal @ 0.62
-      ),
-      context,
-    );
+    return SizedBox(
+      height: _kNavBarH,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
 
-    return Row(
-      children: [
-        // ── BACK PILL ──
-        Stack(
-          clipBehavior: Clip.none,
-          children: [
-            SpringScaleButton(
-              onTap: () => Navigator.of(context).pop(),
-              child: _buildLiquidPill(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    SizedBox(
-                      width: 10,
-                      height: 20,
-                      child: CustomPaint(
-                        painter: _ThinChevron(CupertinoColors.systemBlue.resolveFrom(context)),
-                      ),
+          // ── BACK BUTTON ──
+          CupertinoButton(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            minSize: _kNavBarH,
+            onPressed: () => Navigator.of(context).pop(),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 12,
+                  height: 22,
+                  child: CustomPaint(
+                    painter: _ThinChevron(
+                      _wallpaperAccent(context),
                     ),
-                    const SizedBox(width: 3),
-                    Text(
-                      'Chats',
-                      style: TextStyle(
-                        color: CupertinoColors.systemBlue.resolveFrom(context),
-                        fontSize: 16,
-                        fontWeight: FontWeight.w400,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
-              ),
-            ),
-            // Unread badge on back button (mock for now as count isn't global)
-            if (_unreadCount > 0)
-              Positioned(
-                top: -2,
-              right: -2,
-              child: Container(
-                padding: const EdgeInsets.all(4),
-                decoration: const BoxDecoration(
-                  color: CupertinoColors.systemRed,
-                  shape: BoxShape.circle,
-                ),
-                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                child: const Text(
-                  '12', // Placeholder
+                const SizedBox(width: 4),
+                Text(
+                  'Chats',
                   style: TextStyle(
-                    color: CupertinoColors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
+                    color: _wallpaperAccent(context),
+                    fontSize: 17,
+                    fontWeight: FontWeight.w400,
                   ),
-                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+
+          // ── CENTER: name + presence ──
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => Navigator.of(context).push(
+                TelegramPageRoute(
+                  builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
                 ),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(width: 8),
-
-        // ── CENTER PILL (avatar + name + status) ──
-        Expanded(
-          child: Center(
-            child: SpringScaleButton(
-                onTap: () => Navigator.of(context).push(
-                  CupertinoPageRoute(
-                    builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
-                  ),
-                ),
-                child: _buildLiquidPill(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                  GestureDetector(
-                    onTap: _openProfileViewer,
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [Color(0xFF54C5F8), Color(0xFF2196F3)],
-                        ),
-                      ),
-                      child: (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
-                          ? ClipOval(
-                              child: CachedNetworkImage(
-                                imageUrl: widget.profileUrl!,
-                                fit: BoxFit.cover,
-                                placeholder: (_, __) => _buildFallbackAvatar(34),
-                                errorWidget: (_, __, ___) => _buildFallbackAvatar(34),
-                              ),
-                            )
-                          : _buildFallbackAvatar(34),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    widget.contactName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      color: CupertinoColors.label.resolveFrom(context),
+                      letterSpacing: -0.3,
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: SizedBox(
-                      height: 34,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.contactName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              height: 1.1,
-                              color: CupertinoColors.label.resolveFrom(context),
-                              letterSpacing: -0.5,
-                            ),
-                          ),
-                          _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
-                        ],
-                      ),
-                    ),
-                  ),
+                  const SizedBox(height: 1),
+                  _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
                 ],
               ),
             ),
           ),
-        ),
-      ),
-        const SizedBox(width: 8),
 
-        // ── RIGHT ICONS (video + phone) — individual 34px circles ──
-        _NavPressablePill(
-          height: 34,
-          radius: 17,
-          color: iconPillColor,
-          onTap: () => showCupertinoDialog(
-            context: context,
-            builder: (ctx) => CupertinoAlertDialog(
-              title: const Text('Video Call'),
-              content: const Text('Video calling is not yet supported.'),
-              actions: [
-                CupertinoDialogAction(
-                  isDefaultAction: true,
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('OK'),
+          // ── RIGHT: profile avatar ──
+          GestureDetector(
+            onTap: () => Navigator.of(context).push(
+              TelegramPageRoute(
+                builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: SizedBox(
+                width: 36,
+                height: 36,
+                child: ClipOval(
+                  child: (widget.profileUrl != null && widget.profileUrl!.isNotEmpty)
+                      ? CachedNetworkImage(
+                          imageUrl: widget.profileUrl!,
+                          width: 36,
+                          height: 36,
+                          fit: BoxFit.cover,
+                          placeholder: (_, __) => _buildFallbackAvatar(36),
+                          errorWidget: (_, __, ___) => _buildFallbackAvatar(36),
+                        )
+                      : _buildFallbackAvatar(36),
                 ),
-              ],
+              ),
             ),
           ),
-          child: Icon(
-            CupertinoIcons.video_camera,
-            color: CupertinoColors.systemBlue.resolveFrom(context),
-            size: 20,
-          ),
-        ),
-        const SizedBox(width: 8),
-        _NavPressablePill(
-          height: 34,
-          radius: 17,
-          color: iconPillColor,
-          onTap: () => showCupertinoDialog(
-            context: context,
-            builder: (ctx) => CupertinoAlertDialog(
-              title: const Text('Voice Call'),
-              content: const Text('Voice calling is not yet supported.'),
-              actions: [
-                CupertinoDialogAction(
-                  isDefaultAction: true,
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('OK'),
-                ),
-              ],
-            ),
-          ),
-          child: Icon(
-            CupertinoIcons.phone,
-            color: CupertinoColors.systemBlue.resolveFrom(context),
-            size: 19,
-          ),
-        ),
-      ],
+
+        ],
+      ),
     );
   }
 
   Widget _buildFallbackAvatar(double size) {
-    return Center(
-      child: Text(
-        widget.avatarLetter.toUpperCase(),
-        style: TextStyle(
-          color: CupertinoColors.white,
-          fontSize: size * 0.44,
-          fontWeight: FontWeight.w700,
+    return Container(
+      width: size,
+      height: size,
+      decoration: const BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF54C5F8), Color(0xFF2196F3)],
+        ),
+      ),
+      child: Center(
+        child: Text(
+          widget.avatarLetter.toUpperCase(),
+          style: TextStyle(
+            color: CupertinoColors.white,
+            fontSize: size * 0.44,
+            fontWeight: FontWeight.w800,
+          ),
         ),
       ),
     );
@@ -1379,7 +1286,24 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                         ? '🎤 Voice message'
                         : '📎 Attachment';
 
-        return _buildLiquidPill(
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: CupertinoDynamicColor.resolve(
+              const CupertinoDynamicColor.withBrightness(
+                color: Color(0xCCF2F2F7),
+                darkColor: Color(0xCC1C1C1E),
+              ), context),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CupertinoColors.separator.resolveFrom(context),
+              width: 0.33,
+            ),
+          ),
           child: SizedBox(
             height: 40,
             child: Row(
@@ -1390,7 +1314,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                   child: Icon(
                     CupertinoIcons.pin_fill,
                     size: 14,
-                    color: CupertinoColors.systemBlue,
+                    color: _wallpaperAccent(context),
                   ),
                 ),
                 _PinnedProgressBar(total: docs.length, activeIndex: idx),
@@ -1420,10 +1344,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                             docs.length > 1
                                 ? 'Pinned message ${idx + 1} of ${docs.length}'
                                 : 'Pinned message',
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
-                              color: CupertinoColors.systemBlue,
+                              color: _wallpaperAccent(context),
                             ),
                           ),
                           const SizedBox(height: 2),
@@ -1480,8 +1404,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 ),
               ],
             ),
-          ),
-        );
+          ),  // SizedBox
+          ),  // Container
+          ),  // BackdropFilter
+        );    // ClipRRect
       },
     );
   }
@@ -1593,11 +1519,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
             cacheExtent: 500.0,
             keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             // FIX-2: In reverse:true list, top = visual bottom (items), bottom = visual top (end of list)
+            // Bottom padding = input bar + safe area + keyboard → first bubble sits above bar
+            // As you scroll, bubbles pass under the translucent frosted input bar
             padding: EdgeInsets.fromLTRB(
               4,
               _kNavBarH + MediaQuery.of(context).padding.top + 50,
               4,
-              10, // Small gap at bottom (index 0) — outer Positioned padding handles majority
+              MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).padding.bottom + _kBottomBarEstH + 10,
             ),
             itemCount: docs.length + (_isContactTyping ? 1 : 0),
             itemBuilder: (context, index) {
@@ -1911,7 +1839,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       Text(
                         _replyingTo!['senderName'] ?? 'Reply',
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                            color: CupertinoColors.systemBlue.resolveFrom(context)),
+                            color: _wallpaperAccent(context)),
                       ),
                       const SizedBox(height: 2),
                       Text(
@@ -1948,7 +1876,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 child: Icon(
                   CupertinoIcons.add_circled_solid,
                   size: 34,
-                  color: CupertinoColors.systemBlue.resolveFrom(context),
+                  color: _wallpaperAccent(context),
                 ),
               ),
             ),
@@ -2099,10 +2027,16 @@ class _TelegramBackArrowPainter extends CustomPainter {
 }
 
 // ═══════════════════════════════════════════════
-//  TELEGRAM PAGE ROUTE (edge shadow + parallax)
+//  TELEGRAM PAGE ROUTE (iOS-native slide + parallax)
 // ═══════════════════════════════════════════════
 class TelegramPageRoute<T> extends CupertinoPageRoute<T> {
   TelegramPageRoute({required super.builder, super.settings});
+
+  // iOS-native cubic bezier — matches UIViewAnimationCurveEaseInOut
+  static const _kIOSCurve = Cubic(0.25, 0.1, 0.25, 1.0);
+
+  @override
+  Duration get transitionDuration => const Duration(milliseconds: 350);
 
   @override
   Widget buildTransitions(
@@ -2111,58 +2045,64 @@ class TelegramPageRoute<T> extends CupertinoPageRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    // Squircle corner radius during transition
-    final cornerRadius = Tween<double>(begin: 0, end: 0)
-        .animate(CurvedAnimation(parent: animation, curve: Curves.easeOut));
+    final curvedAnimation = CurvedAnimation(
+      parent: animation,
+      curve: _kIOSCurve,
+      reverseCurve: _kIOSCurve,
+    );
+    final curvedSecondary = CurvedAnimation(
+      parent: secondaryAnimation,
+      curve: _kIOSCurve,
+      reverseCurve: _kIOSCurve,
+    );
 
     return AnimatedBuilder(
       animation: animation,
       builder: (_, __) {
         return Stack(
           children: [
-            // Bottom screen (parallax at 0.3 ratio)
-            if (secondaryAnimation.value > 0)
+            // Previous screen — parallax slide left at 1/3 ratio (iOS standard)
+            if (curvedSecondary.value > 0)
               SlideTransition(
                 position: Tween<Offset>(
                   begin: Offset.zero,
-                  end: const Offset(-0.3, 0),
-                ).animate(secondaryAnimation),
-                child: const SizedBox.expand(),
+                  end: const Offset(-0.333, 0),
+                ).animate(curvedSecondary),
+                child: DecoratedBox(
+                  position: DecorationPosition.foreground,
+                  decoration: BoxDecoration(
+                    // iOS dims the previous page slightly
+                    color: Color.fromRGBO(0, 0, 0, 0.04 * curvedSecondary.value),
+                  ),
+                  child: const SizedBox.expand(),
+                ),
               ),
-            // Edge shadow on leading side
+            // Incoming page — slide from right
             SlideTransition(
               position: Tween<Offset>(
                 begin: const Offset(1.0, 0.0),
                 end: Offset.zero,
-              ).animate(CurvedAnimation(
-                parent: animation,
-                curve: Curves.easeOut,
-              )),
+              ).animate(curvedAnimation),
               child: Stack(
                 children: [
-                  // Shadow on left edge
+                  // Subtle left-edge shadow
                   Positioned(
-                    left: -16,
+                    left: -12,
                     top: 0,
                     bottom: 0,
-                    width: 16,
+                    width: 12,
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFF000000).withValues(alpha: 0.5 * animation.value),
-                            blurRadius: 16.0,
-                            offset: const Offset(0, 0),
+                            color: const Color(0xFF000000).withValues(alpha: 0.15 * animation.value),
+                            blurRadius: 12.0,
                           ),
                         ],
                       ),
                     ),
                   ),
-                  // The actual page content
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(cornerRadius.value),
-                    child: child,
-                  ),
+                  child,
                 ],
               ),
             ),
@@ -2562,10 +2502,7 @@ class _ChatBubble extends StatelessWidget {
                     painter: _BubbleWithTailPainter(
                       isOutgoing: isOutgoing,
                       isTail: isTailMessage,
-                      color: CupertinoDynamicColor.resolve(
-                        isOutgoing ? _outgoingBubbleColor : _incomingBubbleColor,
-                        context,
-                      ),
+                      color: isOutgoing ? _outgoingBubbleColor(context) : _incomingBubbleColor(context),
                     ),
                     child: Padding(
                       // Add extra padding on the tail side so content doesn't overlap the tail
@@ -2683,7 +2620,7 @@ class _ChatBubble extends StatelessWidget {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       color: isHighlighted
-          ? CupertinoColors.systemBlue.withValues(alpha: 0.18)
+          ? _wallpaperAccent(context).withOpacity(0.18)
           : null,
       child: bubbleContent,
     );
@@ -3082,8 +3019,8 @@ class _DeliveryTickState extends State<_DeliveryTick> with SingleTickerProviderS
   @override
   Widget build(BuildContext context) {
     final brightness = CupertinoTheme.brightnessOf(context);
-    final readColor = brightness == Brightness.dark ? const Color(0xFF4FC3F7) : const Color(0xFF4A90D9);
-    final mutedColor = brightness == Brightness.dark ? CupertinoColors.white.withValues(alpha: 0.5) : const Color(0xFF3D8B45);
+    final readColor = _wallpaperAccent(context);
+    final mutedColor = _wallpaperAccent(context).withOpacity(0.55);
 
     switch (widget.status) {
       case 'read':
@@ -3199,7 +3136,7 @@ class _ThinChevron extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color
-      ..strokeWidth = 1.5
+      ..strokeWidth = 2.5
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
     final path = Path()
@@ -3598,7 +3535,7 @@ class _SpringScrollButton extends StatelessWidget {
                     child: Icon(
                       CupertinoIcons.chevron_down,
                       size: 20,
-                      color: CupertinoColors.systemBlue.resolveFrom(context),
+                      color: _wallpaperAccent(context),
                     ),
                   ),
               if (unreadCount > 0)
@@ -3619,7 +3556,7 @@ class _SpringScrollButton extends StatelessWidget {
                           vertical: 1,
                         ),
                         decoration: BoxDecoration(
-                          color: CupertinoColors.systemBlue,
+                          color: _wallpaperAccent(context),
                           borderRadius: BorderRadius.circular(9),
                         ),
                         alignment: Alignment.center,
@@ -3776,8 +3713,8 @@ class _MorphSendButtonState extends State<_MorphSendButton> with SingleTickerPro
           child: Container(
             width: 38,
             height: 38,
-            decoration: const BoxDecoration(
-              color: CupertinoColors.systemBlue,
+            decoration: BoxDecoration(
+              color: _wallpaperAccent(context),
               shape: BoxShape.circle,
             ),
             child: Center(
@@ -3881,7 +3818,7 @@ class _TextContent extends StatelessWidget {
           linkStyle: TextStyle(
             color: isOutgoing
                 ? _outgoingTextColor(context)
-                : CupertinoColors.systemBlue,
+                : _wallpaperAccent(context),
             decoration: TextDecoration.underline,
           ),
         ),
@@ -3918,7 +3855,7 @@ class _LinkPreviewCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           border: Border(
             left: BorderSide(
-              color: isOutgoing ? const Color(0xFF4A90D9) : CupertinoColors.systemBlue,
+              color: _wallpaperAccent(context),
               width: 3,
             ),
           ),
@@ -4081,7 +4018,7 @@ class _ImageContent extends StatelessWidget {
       children: [
         GestureDetector(
           onTap: () => Navigator.of(context).push(
-            CupertinoPageRoute(builder: (_) => _MediaViewerPage(imageUrl: mediaUrl)),
+            TelegramPageRoute(builder: (_) => _MediaViewerPage(imageUrl: mediaUrl)),
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
@@ -4148,7 +4085,7 @@ class _VideoContent extends StatelessWidget {
       children: [
         GestureDetector(
           onTap: () => Navigator.of(context).push(
-            CupertinoPageRoute(builder: (_) => _VideoPlayerPage(videoUrl: mediaUrl)),
+            TelegramPageRoute(builder: (_) => _VideoPlayerPage(videoUrl: mediaUrl)),
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
@@ -4272,13 +4209,11 @@ class _AudioContentState extends State<_AudioContent> {
         ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
         : 0.0;
     final brightness = CupertinoTheme.brightnessOf(context);
-    final activeColor = widget.isOutgoing
-        ? (brightness == Brightness.dark ? const Color(0xFF4FC3F7) : const Color(0xFF3D8B45))
-        : CupertinoColors.systemBlue;
+    final activeColor = _wallpaperAccent(context);
     final inactiveColor = widget.isOutgoing
         ? (brightness == Brightness.dark
             ? CupertinoColors.white.withValues(alpha: 0.30)
-            : const Color(0xFF3D8B45).withValues(alpha: 0.28))
+            : _wallpaperAccent(context).withOpacity(0.28))
         : CupertinoColors.systemGrey3.resolveFrom(context);
 
     return SizedBox(
@@ -4387,14 +4322,14 @@ class _FileContent extends StatelessWidget {
               height: 42,
               decoration: BoxDecoration(
                 color: isOutgoing
-                    ? const Color(0xFF3D8B45).withValues(alpha: 0.22)
-                    : CupertinoColors.systemBlue.withValues(alpha: 0.15),
+                    ? _wallpaperAccent(context).withOpacity(0.22)
+                    : _wallpaperAccent(context).withOpacity(0.15),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(
                 CupertinoIcons.doc_fill,
                 size: 24,
-                color: isOutgoing ? const Color(0xFF3D8B45) : CupertinoColors.systemBlue,
+                color: _wallpaperAccent(context),
               ),
             ),
             const SizedBox(width: 10),

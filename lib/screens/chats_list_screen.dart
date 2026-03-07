@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart' show LinearProgressIndicator, AlwaysStoppedAnimation;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'chat_detail_screen.dart';
+import 'chat_detail_screen.dart' show ChatDetailScreen, TelegramPageRoute;
 import 'contact_picker_screen.dart';
 
 class ChatsListScreen extends StatefulWidget {
@@ -377,7 +377,7 @@ class _ComposeButtonState extends State<_ComposeButton> {
         setState(() => _scale = 1.0);
         HapticFeedback.selectionClick();
         Navigator.of(context).push(
-          CupertinoPageRoute(builder: (_) => const ContactPickerScreen()),
+          TelegramPageRoute(builder: (_) => const ContactPickerScreen()),
         );
       },
       onTapCancel: () => setState(() => _scale = 1.0),

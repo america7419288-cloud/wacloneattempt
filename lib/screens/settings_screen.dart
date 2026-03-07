@@ -3,6 +3,7 @@ import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../theme_provider.dart';
 import 'wallpaper_picker_screen.dart';
+import 'chat_detail_screen.dart' show TelegramPageRoute;
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -297,7 +298,7 @@ class SettingsScreen extends StatelessWidget {
                       title: 'Chat Wallpaper',
                       onPressed: () {
                         Navigator.of(context).push(
-                          CupertinoPageRoute(
+                          TelegramPageRoute(
                             builder: (_) => const WallpaperPickerScreen(),
                           ),
                         );

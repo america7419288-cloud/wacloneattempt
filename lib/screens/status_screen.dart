@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
 import 'status_view_screen.dart';
+import 'chat_detail_screen.dart' show TelegramPageRoute;
 
 // The user's own JID — used to identify "My Status" stories
 const String kOwnJid = '919728470719@s.whatsapp.net';
@@ -235,7 +236,7 @@ class _StatusRingStrip extends StatelessWidget {
                 if (myLatestStoryUrl != null && myLatestStoryUrl!.isNotEmpty) {
                   Navigator.push(
                     context,
-                    CupertinoPageRoute(
+                    TelegramPageRoute(
                       builder: (_) => StatusViewScreen(
                         url: myLatestStoryUrl!,
                         senderName: 'My Status',
@@ -270,7 +271,7 @@ class _StatusRingStrip extends StatelessWidget {
               if (storyUrl.isNotEmpty || storyType == 'text') {
                 Navigator.push(
                   context,
-                  CupertinoPageRoute(
+                  TelegramPageRoute(
                     builder: (_) => StatusViewScreen(
                       url: storyUrl,
                       senderName: senderName,
@@ -464,7 +465,7 @@ class _RecentStories extends StatelessWidget {
             if (storyUrl.isNotEmpty || storyType == 'text') {
               Navigator.push(
                 context,
-                CupertinoPageRoute(
+                TelegramPageRoute(
                   builder: (_) => StatusViewScreen(
                     url: storyUrl,
                     senderName: senderName,
