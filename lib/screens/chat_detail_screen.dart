@@ -204,9 +204,7 @@ class _TelegramBubbleEntranceState extends State<_TelegramBubbleEntrance>
 //  UTILITIES for background processing & animations
 // ─────────────────────────────────────────────
 Future<Uint8List> _readFileBytes(String path) async {
-  return await SystemChannels.platform.invokeMethod('SystemChrome.readFileBytes', path);
-  // FALLBACK: If method channel fails, use standard dart:io
-  // final file = File(path); return await file.readAsBytes();
+  return await File(path).readAsBytes();
 }
 
 class SpringCurve extends Curve {
@@ -900,7 +898,7 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     await Future.delayed(const Duration(milliseconds: 100));
 
     try {
-      final fileBytes = await compute(_readFileBytes, file.path);
+      final fileBytes = await _readFileBytes(file.path);
       final ext = file.name.contains('.') ? file.name.split('.').last.toLowerCase() : 'jpg';
       final fileName = '${DateTime.now().millisecondsSinceEpoch}.$ext';
 
@@ -1173,7 +1171,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
               behavior: HitTestBehavior.opaque,
               onTap: () => Navigator.of(context).push(
                 TelegramPageRoute(
-                  builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
+                  builder: (_) => widget.contactJid.endsWith('@g.us')
+                      ? GroupInfoScreen(
+                          groupJid: widget.contactJid,
+                          groupName: widget.contactName,
+                          profileUrl: widget.profileUrl,
+                        )
+                      : ContactInfoScreen(contactJid: widget.contactJid),
                 ),
               ),
               child: Column(
@@ -1191,7 +1195,25 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                     ),
                   ),
                   const SizedBox(height: 1),
-                  _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
+                  widget.contactJid.endsWith('@g.us')
+                      ? StreamBuilder<DocumentSnapshot>(
+                          stream: FirebaseFirestore.instance
+                              .collection('contacts')
+                              .doc(widget.contactJid)
+                              .snapshots(),
+                          builder: (_, snap) {
+                            final d = snap.data?.data() as Map<String, dynamic>?;
+                            final count = (d?['participants'] as List?)?.length ?? 0;
+                            return Text(
+                              count > 0 ? '$count members' : 'Group',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                              ),
+                            );
+                          },
+                        )
+                      : _PresenceSubtitle(stream: _contactStream, ownJid: kOwnJid),
                 ],
               ),
             ),
@@ -1201,7 +1223,13 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
           GestureDetector(
             onTap: () => Navigator.of(context).push(
               TelegramPageRoute(
-                builder: (_) => ContactInfoScreen(contactJid: widget.contactJid),
+                builder: (_) => widget.contactJid.endsWith('@g.us')
+                    ? GroupInfoScreen(
+                        groupJid: widget.contactJid,
+                        groupName: widget.contactName,
+                        profileUrl: widget.profileUrl,
+                      )
+                    : ContactInfoScreen(contactJid: widget.contactJid),
               ),
             ),
             child: Padding(
@@ -2045,15 +2073,15 @@ class TelegramPageRoute<T> extends CupertinoPageRoute<T> {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    final curvedAnimation = CurvedAnimation(
+    final curvedAnim = CurvedAnimation(
       parent: animation,
-      curve: _kIOSCurve,
-      reverseCurve: _kIOSCurve,
+      curve: const Cubic(0.25, 0.1, 0.25, 1.0),
+      reverseCurve: const Cubic(0.25, 0.1, 0.25, 1.0),
     );
     final curvedSecondary = CurvedAnimation(
       parent: secondaryAnimation,
-      curve: _kIOSCurve,
-      reverseCurve: _kIOSCurve,
+      curve: const Cubic(0.25, 0.1, 0.25, 1.0),
+      reverseCurve: const Cubic(0.25, 0.1, 0.25, 1.0),
     );
 
     return AnimatedBuilder(
@@ -2061,49 +2089,33 @@ class TelegramPageRoute<T> extends CupertinoPageRoute<T> {
       builder: (_, __) {
         return Stack(
           children: [
-            // Previous screen — parallax slide left at 1/3 ratio (iOS standard)
+            // Previous screen: parallax slide left + fade out slightly
             if (curvedSecondary.value > 0)
-              SlideTransition(
-                position: Tween<Offset>(
-                  begin: Offset.zero,
-                  end: const Offset(-0.333, 0),
-                ).animate(curvedSecondary),
-                child: DecoratedBox(
-                  position: DecorationPosition.foreground,
-                  decoration: BoxDecoration(
-                    // iOS dims the previous page slightly
-                    color: Color.fromRGBO(0, 0, 0, 0.04 * curvedSecondary.value),
-                  ),
-                  child: const SizedBox.expand(),
+              FadeTransition(
+                opacity: Tween<double>(begin: 1.0, end: 0.85)
+                    .animate(curvedSecondary),
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: Offset.zero,
+                    end: const Offset(-0.25, 0),
+                  ).animate(curvedSecondary),
+                  child: child, // Note: 'child' is the previous route here
                 ),
               ),
-            // Incoming page — slide from right
-            SlideTransition(
-              position: Tween<Offset>(
-                begin: const Offset(1.0, 0.0),
-                end: Offset.zero,
-              ).animate(curvedAnimation),
-              child: Stack(
-                children: [
-                  // Subtle left-edge shadow
-                  Positioned(
-                    left: -12,
-                    top: 0,
-                    bottom: 0,
-                    width: 12,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFF000000).withValues(alpha: 0.15 * animation.value),
-                            blurRadius: 12.0,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  child,
-                ],
+            // Incoming screen: slide from right + fade in
+            FadeTransition(
+              opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+                CurvedAnimation(
+                  parent: animation,
+                  curve: const Interval(0.0, 0.6, curve: Curves.easeOut),
+                ),
+              ),
+              child: SlideTransition(
+                position: Tween<Offset>(
+                  begin: const Offset(0.08, 0),
+                  end: Offset.zero,
+                ).animate(curvedAnim),
+                child: child,
               ),
             ),
           ],
@@ -3160,53 +3172,194 @@ class _ReactionsRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Deduplicate by emoji
-    final Map<String, int> counts = {};
+    // Group by emoji, collecting senders per emoji
+    final Map<String, List<String>> bySender = {};
     for (final r in reactions) {
       if (r is Map) {
         final emoji = r['emoji'] as String? ?? '';
-        if (emoji.isNotEmpty) counts[emoji] = (counts[emoji] ?? 0) + 1;
+        final sender = r['sender'] as String? ?? '';
+        if (emoji.isNotEmpty) {
+          bySender.putIfAbsent(emoji, () => []).add(sender);
+        }
       }
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-      decoration: BoxDecoration(
-        color: CupertinoColors.systemBackground.resolveFrom(context),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: CupertinoColors.separator.resolveFrom(context),
-          width: 0.5,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: CupertinoColors.black.withValues(alpha: 0.10),
-            blurRadius: 4,
-            offset: const Offset(0, 1),
+    return GestureDetector(
+      onTap: () => _showReactionSheet(context, bySender),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          color: CupertinoColors.systemBackground.resolveFrom(context),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: CupertinoColors.separator.resolveFrom(context),
+            width: 0.5,
           ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: counts.entries.take(3).toList().asMap().entries.map((entry) {
-          final i = entry.key;
-          final e = entry.value;
-          return Transform.translate(
-            offset: Offset(i * -4.0, 0),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(e.key, style: const TextStyle(fontSize: 13.5)),
-                if (e.value > 1) ...[
-                  const SizedBox(width: 1),
-                  Text('${e.value}',
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: CupertinoColors.systemGrey)),
-                ],
-              ],
+          boxShadow: [
+            BoxShadow(
+              color: CupertinoColors.black.withValues(alpha: 0.10),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
             ),
-          );
-        }).toList(),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: bySender.entries.take(3).toList().asMap().entries.map((entry) {
+            final i = entry.key;
+            final e = entry.value;
+            return Transform.translate(
+              offset: Offset(i * -4.0, 0),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(e.key, style: const TextStyle(fontSize: 13.5)),
+                  if (e.value.length > 1) ...[
+                    const SizedBox(width: 1),
+                    Text('${e.value.length}',
+                        style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.systemGrey)),
+                  ],
+                ],
+              ),
+            );
+          }).toList(),
+        ),
       ),
+    );
+  }
+
+  void _showReactionSheet(BuildContext context, Map<String, List<String>> bySender) {
+    final ownPhone = kOwnJid.split('@').first;
+    showCupertinoModalPopup(
+      context: context,
+      builder: (_) => Container(
+        height: 320,
+        decoration: BoxDecoration(
+          color: CupertinoColors.systemBackground.resolveFrom(context),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 8, bottom: 4),
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: CupertinoColors.systemGrey3.resolveFrom(context),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Emoji tabs
+            SizedBox(
+              height: 44,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                children: [
+                  _ReactionTab(emoji: '  All  ', count: reactions.length, isAll: true),
+                  ...bySender.entries.map((e) =>
+                      _ReactionTab(emoji: e.key, count: e.value.length)),
+                ],
+              ),
+            ),
+            Container(height: 0.5, color: CupertinoColors.separator.resolveFrom(context)),
+            // Senders list
+            Expanded(
+              child: _ReactionSenderList(
+                bySender: bySender,
+                ownPhone: ownPhone,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ReactionTab extends StatelessWidget {
+  final String emoji;
+  final int count;
+  final bool isAll;
+  const _ReactionTab({required this.emoji, required this.count, this.isAll = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: CupertinoColors.systemGrey6.resolveFrom(context),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          isAll ? 'All $count' : '$emoji $count',
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReactionSenderList extends StatefulWidget {
+  final Map<String, List<String>> bySender;
+  final String ownPhone;
+  const _ReactionSenderList({required this.bySender, required this.ownPhone});
+
+  @override
+  State<_ReactionSenderList> createState() => _ReactionSenderListState();
+}
+
+class _ReactionSenderListState extends State<_ReactionSenderList> {
+  String? _filter; // null = show all
+
+  @override
+  Widget build(BuildContext context) {
+    final List<MapEntry<String, String>> items = []; // (emoji, senderJid)
+    for (final entry in widget.bySender.entries) {
+      if (_filter == null || _filter == entry.key) {
+        for (final s in entry.value) {
+          items.add(MapEntry(entry.key, s));
+        }
+      }
+    }
+
+    return ListView.builder(
+      itemCount: items.length,
+      itemBuilder: (_, i) {
+        final emoji = items[i].key;
+        final jid = items[i].value;
+        final phone = jid.split('@').first;
+        final isMe = jid.contains(widget.ownPhone);
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(
+                  color: _senderColorFromJid(jid),
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Text(phone.isNotEmpty ? phone[0] : '?',
+                    style: const TextStyle(color: CupertinoColors.white,
+                        fontWeight: FontWeight.w600, fontSize: 15)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(isMe ? 'You' : '+$phone',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+              ),
+              Text(emoji, style: const TextStyle(fontSize: 22)),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -4621,4 +4774,369 @@ class _VideoPlayerPageState extends State<_VideoPlayerPage> {
       ),
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  GROUP INFO SCREEN
+// ═══════════════════════════════════════════════════════════════════════
+class GroupInfoScreen extends StatefulWidget {
+  final String groupJid;
+  final String groupName;
+  final String? profileUrl;
+
+  const GroupInfoScreen({
+    super.key,
+    required this.groupJid,
+    required this.groupName,
+    this.profileUrl,
+  });
+
+  @override
+  State<GroupInfoScreen> createState() => _GroupInfoScreenState();
+}
+
+class _GroupInfoScreenState extends State<GroupInfoScreen> {
+  bool _isAdmin = false;
+  bool _editing = false;
+  late TextEditingController _nameCtrl;
+  late TextEditingController _descCtrl;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl = TextEditingController(text: widget.groupName);
+    _descCtrl = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _descCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveGroupInfo() async {
+    setState(() => _saving = true);
+    await FirebaseFirestore.instance.collection('commands').add({
+      'type': 'UPDATE_GROUP_INFO',
+      'groupJid': widget.groupJid,
+      'newName': _nameCtrl.text.trim(),
+      'newDescription': _descCtrl.text.trim(),
+      'status': 'pending',
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+    if (mounted) setState(() { _saving = false; _editing = false; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _wallpaperAccent(context);
+    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+
+    return CupertinoPageScaffold(
+      child: StreamBuilder<DocumentSnapshot>(
+        stream: FirebaseFirestore.instance
+            .collection('contacts')
+            .doc(widget.groupJid)
+            .snapshots(),
+        builder: (context, snap) {
+          final data = snap.data?.data() as Map<String, dynamic>? ?? {};
+          final name = data['name'] as String? ?? widget.groupName;
+          final desc = data['description'] as String? ?? '';
+          final participants = (data['participants'] as List<dynamic>? ?? [])
+              .whereType<Map>()
+              .toList();
+
+          // Detect if I am admin
+          final ownPhone = kOwnJid.split('@').first;
+          _isAdmin = participants.any((p) {
+            final pJid = (p['jid'] as String? ?? '');
+            return pJid.contains(ownPhone) && p['isAdmin'] == true;
+          });
+
+          // Populate desc controller once
+          if (_descCtrl.text.isEmpty && desc.isNotEmpty) {
+            _descCtrl.text = desc;
+          }
+
+          final topPad = MediaQuery.of(context).padding.top;
+
+          return Stack(
+            children: [
+              ListView(
+                padding: EdgeInsets.only(top: topPad + 56, bottom: 32),
+                children: [
+                  // ── Avatar + name header ──
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Column(
+                      children: [
+                        ClipOval(
+                          child: SizedBox(
+                            width: 80, height: 80,
+                            child: (widget.profileUrl?.isNotEmpty == true)
+                                ? CachedNetworkImage(
+                                    imageUrl: widget.profileUrl!,
+                                    fit: BoxFit.cover,
+                                  )
+                                : Container(
+                                    color: accent,
+                                    alignment: Alignment.center,
+                                    child: Text(
+                                      name.isNotEmpty ? name[0].toUpperCase() : 'G',
+                                      style: const TextStyle(
+                                        fontSize: 34, fontWeight: FontWeight.w600,
+                                        color: CupertinoColors.white,
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        if (_editing) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            child: CupertinoTextField(
+                              controller: _nameCtrl,
+                              placeholder: 'Group name',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                            child: CupertinoTextField(
+                              controller: _descCtrl,
+                              placeholder: 'Add group description…',
+                              textAlign: TextAlign.center,
+                              maxLines: 3,
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          CupertinoButton(
+                            onPressed: _saving ? null : _saveGroupInfo,
+                            child: _saving
+                                ? const CupertinoActivityIndicator()
+                                : Text('Save', style: TextStyle(color: accent)),
+                          ),
+                        ] else ...[
+                          Text(name,
+                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+                          if (desc.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 32),
+                              child: Text(desc,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      fontSize: 13,
+                                      color: CupertinoColors.secondaryLabel.resolveFrom(context))),
+                            ),
+                          ],
+                          Text('${participants.length} members',
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  color: CupertinoColors.secondaryLabel.resolveFrom(context))),
+                        ],
+                      ],
+                    ),
+                  ),
+
+                  // ── Members list header ──
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    child: Text('MEMBERS',
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.5,
+                            color: CupertinoColors.secondaryLabel.resolveFrom(context))),
+                  ),
+
+                  // ── Members list ──
+                  Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF1C1C1E) : CupertinoColors.white,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: participants.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.all(16),
+                            child: Text('No member data — send a message to refresh',
+                                textAlign: TextAlign.center),
+                          )
+                        : Column(
+                            children: participants.asMap().entries.map((entry) {
+                              final i = entry.key;
+                              final p = entry.value as Map;
+                              final pJid = p['jid'] as String? ?? '';
+                              final isParticipantAdmin = p['isAdmin'] == true;
+                              final isSuperAdmin = p['isSuperAdmin'] == true;
+                              final ownPhone = kOwnJid.split('@').first;
+                              final isMe = pJid.contains(ownPhone);
+
+                              return Column(
+                                children: [
+                                  if (i > 0)
+                                    Container(
+                                        margin: const EdgeInsets.only(left: 56),
+                                        height: 0.5,
+                                        color: CupertinoColors.separator.resolveFrom(context)),
+                                  // Look up the real contact doc for name + profile pic
+                                  StreamBuilder<DocumentSnapshot>(
+                                    stream: FirebaseFirestore.instance
+                                        .collection('contacts')
+                                        .doc(pJid)
+                                        .snapshots(),
+                                    builder: (context, contactSnap) {
+                                      final cd = contactSnap.data?.data() as Map<String, dynamic>?;
+                                      final displayName = isMe
+                                          ? 'You'
+                                          : (cd?['name'] as String?)?.isNotEmpty == true
+                                              ? cd!['name'] as String
+                                              : '+${pJid.split('@').first}';
+                                      final profileUrl = cd?['profileUrl'] as String? ?? '';
+                                      final initial = displayName.isNotEmpty ? displayName[0].toUpperCase() : '?';
+
+                                      return Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                        child: Row(
+                                          children: [
+                                            // Avatar — real profile pic or coloured initial
+                                            ClipOval(
+                                              child: SizedBox(
+                                                width: 36, height: 36,
+                                                child: profileUrl.isNotEmpty
+                                                    ? CachedNetworkImage(
+                                                        imageUrl: profileUrl,
+                                                        fit: BoxFit.cover,
+                                                        errorWidget: (_, __, ___) => _initialAvatar(
+                                                            initial, _senderColorFromJid(pJid)),
+                                                      )
+                                                    : _initialAvatar(initial, _senderColorFromJid(pJid)),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 12),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(displayName,
+                                                      style: const TextStyle(
+                                                          fontSize: 15, fontWeight: FontWeight.w500)),
+                                                  if (isParticipantAdmin)
+                                                    Text(
+                                                      isSuperAdmin ? 'Super Admin' : 'Admin',
+                                                      style: TextStyle(fontSize: 12, color: accent),
+                                                    ),
+                                                ],
+                                              ),
+                                            ),
+                                            if (isParticipantAdmin)
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: accent.withOpacity(0.12),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: Text('Admin',
+                                                    style: TextStyle(
+                                                        fontSize: 11,
+                                                        fontWeight: FontWeight.w600,
+                                                        color: accent)),
+                                              ),
+                                          ],
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              );
+                            }).toList(),
+                          ),
+                  ),
+                ],
+              ),
+
+              // ── Nav bar ──
+              Positioned(
+                top: 0, left: 0, right: 0,
+                height: topPad + 56,
+                child: ClipRect(
+                  child: BackdropFilter(
+                    filter: ui.ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: isDark
+                            ? const Color(0xCC1C1C1E)
+                            : const Color(0xCCF2F2F7),
+                        border: Border(
+                          bottom: BorderSide(
+                            color: CupertinoColors.separator.resolveFrom(context),
+                            width: 0.33,
+                          ),
+                        ),
+                      ),
+                      padding: EdgeInsets.only(top: topPad),
+                      child: Row(
+                        children: [
+                          CupertinoButton(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: Text('Back',
+                                style: TextStyle(color: accent, fontSize: 17)),
+                          ),
+                          const Expanded(
+                            child: Text('Group Info',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                          ),
+                          if (_isAdmin)
+                            CupertinoButton(
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              onPressed: () => setState(() => _editing = !_editing),
+                              child: Text(_editing ? 'Cancel' : 'Edit',
+                                  style: TextStyle(color: accent, fontSize: 17)),
+                            )
+                          else
+                            const SizedBox(width: 70),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// Helper: deterministic color from JID string (same palette as _senderColor)
+Color _senderColorFromJid(String jid) {
+  const palette = [
+    Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF3F51B5),
+    Color(0xFF2196F3), Color(0xFF009688), Color(0xFF4CAF50),
+    Color(0xFFFF5722), Color(0xFF795548),
+  ];
+  final idx = jid.codeUnits.fold(0, (a, b) => a + b) % palette.length;
+  return palette[idx];
+}
+
+Widget _initialAvatar(String initial, Color color) {
+  return Container(
+    color: color,
+    alignment: Alignment.center,
+    child: Text(initial,
+        style: const TextStyle(
+            color: CupertinoColors.white,
+            fontWeight: FontWeight.w600,
+            fontSize: 15)),
+  );
 }

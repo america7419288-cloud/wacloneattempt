@@ -131,9 +131,15 @@ async function startWhatsApp() {
                     const groupPayload = {
                         jid: jid,
                         name: groupMeta.subject || finalName,
+                        description: groupMeta.desc || '',
                         isGroup: true,
                         avatarLetter: (groupMeta.subject || finalName).charAt(0).toUpperCase(),
                         onlyAdminsCanMessage: groupMeta.announce || false,
+                        participants: (groupMeta.participants || []).map(p => ({
+                            jid: p.id,
+                            isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+                            isSuperAdmin: p.admin === 'superadmin',
+                        })),
                     };
                     const gpic = await fetchAndStoreProfilePic(jid, sock);
                     if (gpic) { groupPayload.profileUrl = gpic; groupPayload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp(); }
@@ -970,9 +976,15 @@ function listenToCommands(sock) {
                             try {
                                 const gm = await sock.groupMetadata(jid);
                                 updatePayload.name = gm.subject || jid.split('@')[0];
+                                updatePayload.description = gm.desc || '';
                                 updatePayload.isGroup = true;
                                 updatePayload.onlyAdminsCanMessage = gm.announce || false;
                                 updatePayload.avatarLetter = (gm.subject || 'G').charAt(0).toUpperCase();
+                                updatePayload.participants = (gm.participants || []).map(p => ({
+                                    jid: p.id,
+                                    isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+                                    isSuperAdmin: p.admin === 'superadmin',
+                                }));
                                 console.log(`👥 Refreshed group: ${gm.subject}`);
                             } catch (gErr) {
                                 console.log(`Could not fetch group metadata for ${jid}`);
@@ -1014,10 +1026,16 @@ function listenToCommands(sock) {
                             const payload = {
                                 jid: jidLower,
                                 name: groupMeta.subject || jidLower.split('@')[0],
+                                description: groupMeta.desc || '',
                                 isGroup: true,
                                 avatarLetter: (groupMeta.subject || 'G').charAt(0).toUpperCase(),
                                 onlyAdminsCanMessage: groupMeta.announce || false,
                                 timestamp: admin.firestore.FieldValue.serverTimestamp(),
+                                participants: (groupMeta.participants || []).map(p => ({
+                                    jid: p.id,
+                                    isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+                                    isSuperAdmin: p.admin === 'superadmin',
+                                })),
                             };
                             const gpic = await fetchAndStoreProfilePic(jidLower, sock);
                             if (gpic) { payload.profileUrl = gpic; payload.lastPicUpdate = admin.firestore.FieldValue.serverTimestamp(); }
@@ -1026,6 +1044,34 @@ function listenToCommands(sock) {
                         }
                         console.log('✅ All groups synced.');
                     } catch (e) { console.error('Group sync error:', e.message); }
+                }
+
+                // ── UPDATE_GROUP_INFO command ──────────────────────────
+                if (data.type === 'UPDATE_GROUP_INFO') {
+                    const docRef = change.doc.ref;
+                    try {
+                        const { groupJid, newName, newDescription } = data;
+                        if (newName) await sock.groupUpdateSubject(groupJid, newName);
+                        if (newDescription !== undefined) await sock.groupUpdateDescription(groupJid, newDescription);
+                        // Re-fetch and persist updated metadata
+                        const gm = await sock.groupMetadata(groupJid);
+                        await db.collection('contacts').doc(groupJid).set({
+                            name: gm.subject || groupJid.split('@')[0],
+                            description: gm.desc || '',
+                            onlyAdminsCanMessage: gm.announce || false,
+                            participants: (gm.participants || []).map(p => ({
+                                jid: p.id,
+                                isAdmin: p.admin === 'admin' || p.admin === 'superadmin',
+                                isSuperAdmin: p.admin === 'superadmin',
+                            })),
+                            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                        }, { merge: true });
+                        await docRef.update({ status: 'done' });
+                        console.log(`✅ Group info updated: ${gm.subject}`);
+                    } catch (e) {
+                        console.error('UPDATE_GROUP_INFO error:', e.message);
+                        await docRef.update({ status: 'error', error: e.message });
+                    }
                 }
 
                 // Delete the command doc after processing
